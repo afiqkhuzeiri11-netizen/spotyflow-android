@@ -51,7 +51,7 @@ jobs:
           tag_name: latest-apk
           name: SpotyFlow Native v2.7.0
           body: |
-            SpotyFlow 100% Native Android (v2.8.0-native, Build 12) — Auralys-Grade Super-Accurate Object Cutout!
+            SpotyFlow 100% Native Android (v2.9.0-native, Build 13) — Auralys-Grade Super-Accurate Object Cutout!
             - Keeps 100% classic Poster Lagu 3D Pro UI (all 3D music cards, 5 Pro Presets, 5 Tabs, Rim Light, Teks 3D, B&W Color-Pop, 2-Finger Pinch/Rotate, Brush Refine & Checkerboard)
             - Upgrades ONLY the background-photo object cutter to Dual-AI Google ML Kit Subject Segmentation (motorcycles, cars, people, pets, dark scenes) + Offline Selfie Fallback + 4-Stage Studio Matte Refinement (1:1 pixel overlay on Layer 3, cards sandwiched in Layer 2!)
             - Keeps YouTube Music Live Search, HD Artist Banner, Full Album, Official Track Credits, Liquid Glass Real Water Drops, Dynamic Island 6 Styles & 5 Home Widgets

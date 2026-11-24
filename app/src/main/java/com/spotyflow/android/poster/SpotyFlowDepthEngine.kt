@@ -401,44 +401,114 @@ object SpotyFlowDepthEngine {
             null
         }
 
-        // Stage 1: Guided Edge-Aware Alpha Matting guided by Layer 1's actual RGB luminance
+        // Stage 1: Border-Connected Low-Confidence Background Purge (erases glowing floors & wall haze!)
+        val bgPurgeThresh = (sens + 0.14f).coerceIn(0.28f, 0.76f)
+        val bgVisited = BooleanArray(total)
+        val bfsQueue = IntArray(total)
+        var qHead = 0
+        var qTail = 0
+        fun seedBg(idx: Int) {
+            if (!bgVisited[idx] && rawConfidence[idx] < bgPurgeThresh) {
+                bgVisited[idx] = true
+                bfsQueue[qTail++] = idx
+            }
+        }
+        for (x in 0 until maskW) {
+            seedBg(x)
+            seedBg((maskH - 1) * maskW + x)
+        }
+        for (y in 1 until maskH - 1) {
+            seedBg(y * maskW)
+            seedBg(y * maskW + (maskW - 1))
+        }
+        while (qHead < qTail) {
+            val cur = bfsQueue[qHead++]
+            val cx = cur % maskW
+            val cy = cur / maskW
+            if (cx > 0) seedBg(cur - 1)
+            if (cx < maskW - 1) seedBg(cur + 1)
+            if (cy > 0) seedBg(cur - maskW)
+            if (cy < maskH - 1) seedBg(cur + maskW)
+        }
+
+        // Stage 2: Strict Background Cutoff Smoothstep + Fringe Tightening (kills 5%-35% floor/wall smudge!)
+        val halfSpan = 0.08f + feather * 0.16f
+        val low = (sens - halfSpan).coerceIn(0.14f, 0.75f)
+        val high = (sens + halfSpan + 0.08f).coerceIn(low + 0.06f, 0.95f)
+        val invRange = 1f / (high - low).coerceAtLeast(0.01f)
+
+        val work = FloatArray(total)
+        for (i in 0 until total) {
+            if (bgVisited[i]) {
+                work[i] = 0f
+                continue
+            }
+            val c = rawConfidence[i]
+            var a = when {
+                c <= low -> 0f
+                c >= high -> 1f
+                else -> {
+                    val t = ((c - low) * invRange).coerceIn(0f, 1f)
+                    val s = t * t * (3f - 2f * t)
+                    Math.pow(s.toDouble(), 1.18).toFloat()
+                }
+            }
+            work[i] = a
+        }
+
+        // Stage 3: Main-Subject Connected-Component Filter (kills disconnected floor debris/bags/lamps; keeps connected handlebars/mirrors!)
+        val labels = IntArray(total)
+        val compSizes = ArrayList<Int>(64).apply { add(0) }
+        var nextLabel = 1
+        var maxComp = 0
+        for (i in 0 until total) {
+            if (work[i] < 0.35f || labels[i] != 0) continue
+            val lbl = nextLabel++
+            var hd = 0
+            var tl = 0
+            labels[i] = lbl
+            bfsQueue[tl++] = i
+            while (hd < tl) {
+                val cur = bfsQueue[hd++]
+                val cx = cur % maskW
+                val cy = cur / maskW
+                if (cx > 0 && work[cur - 1] >= 0.35f && labels[cur - 1] == 0) { labels[cur - 1] = lbl; bfsQueue[tl++] = cur - 1 }
+                if (cx < maskW - 1 && work[cur + 1] >= 0.35f && labels[cur + 1] == 0) { labels[cur + 1] = lbl; bfsQueue[tl++] = cur + 1 }
+                if (cy > 0 && work[cur - maskW] >= 0.35f && labels[cur - maskW] == 0) { labels[cur - maskW] = lbl; bfsQueue[tl++] = cur - maskW }
+                if (cy < maskH - 1 && work[cur + maskW] >= 0.35f && labels[cur + maskW] == 0) { labels[cur + maskW] = lbl; bfsQueue[tl++] = cur + maskW }
+            }
+            compSizes.add(tl)
+            if (tl > maxComp) maxComp = tl
+        }
+        val minKeep = max(48, (maxComp * 0.05f).toInt())
+        for (i in 0 until total) {
+            val lbl = labels[i]
+            if (lbl == 0 || compSizes[lbl] < minKeep) {
+                if (work[i] < 0.90f || (lbl > 0 && compSizes[lbl] < minKeep)) {
+                    work[i] = 0f
+                }
+            }
+        }
+
+        // Stage 4: Fast O(N) Guided Edge-Aware Alpha Matting guided by Layer 1 RGB luminance
         val guideLum = extractLuminance(uprightFullPhoto, maskW, maskH)
         val guided = guidedFilterAlpha(
             guide = guideLum,
-            srcAlpha = rawConfidence,
+            srcAlpha = work,
             w = maskW,
             h = maskH,
             radius = if (max(maskW, maskH) >= 720) 4 else 3,
-            eps = 0.0022f
+            eps = 0.002f
         )
 
-        // Stage 2: Clean Alpha Curve (neutral around 0.48-0.52 preserves full studio edges!) + Manual Brush
-        val isNeutral = kotlin.math.abs(sens - 0.50f) < 0.03f
-        val bias = (0.50f - sens) * 0.85f
-        val span = 0.025f + feather * 0.14f
-        val low = (0.50f - bias - span).coerceAtLeast(0.02f)
-        val high = (0.50f - bias + span).coerceAtMost(0.98f)
-        val invRange = 1f / (high - low).coerceAtLeast(0.01f)
-
+        // Stage 5: Final Clean Alpha + Manual Rapikan Kuas Override (ALWAYS wins!)
         val maskPixels = IntArray(total)
         for (i in 0 until total) {
             var a = guided[i].coerceIn(0f, 1f)
-            if (isNeutral) {
-                // Keep exact Guided-Filter neural alpha; snap micro-haze (<4%) to pure 0 and solid (>96%) to 1
-                a = when {
-                    a < 0.04f -> 0f
-                    a > 0.96f -> 1f
-                    else -> a
-                }
-            } else {
-                a = when {
-                    a <= low -> 0f
-                    a >= high -> 1f
-                    else -> {
-                        val t = ((a - low) * invRange).coerceIn(0f, 1f)
-                        t * t * (3f - 2f * t)
-                    }
-                }
+            a = when {
+                a < 0.06f -> 0f
+                a > 0.95f -> 1f
+                else -> a
             }
             if (brushPixels != null) {
                 val bp = brushPixels[i]
