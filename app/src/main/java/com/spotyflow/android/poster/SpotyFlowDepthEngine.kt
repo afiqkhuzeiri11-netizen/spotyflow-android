@@ -150,7 +150,7 @@ object SpotyFlowDepthEngine {
         uprightFullPhoto: Bitmap,
         onStatus: (String) -> Unit = {}
     ): DepthCutoutResult = withContext(Dispatchers.Default) {
-        val maxWorkSide = 640
+        val maxWorkSide = 1024
         val longest = max(uprightFullPhoto.width, uprightFullPhoto.height)
         val workBmp = if (longest > maxWorkSide) {
             val scale = maxWorkSide.toFloat() / longest.toFloat()
@@ -276,7 +276,7 @@ object SpotyFlowDepthEngine {
         segmenter: SubjectSegmenter,
         onStatus: (String) -> Unit
     ): Boolean {
-        return withTimeoutOrNull(25_000L) {
+        return withTimeoutOrNull(45_000L) {
             suspendCancellableCoroutine { cont ->
                 val client = ModuleInstall.getClient(context)
                 var listenerRef: InstallStatusListener? = null
@@ -365,11 +365,12 @@ object SpotyFlowDepthEngine {
     }
 
     /**
-     * Builds Full-HD 1:1 transparent subject cutout + alphaMaskBitmap with 4-Stage Studio Matte Refinement:
-     * 1. Smoothstep S-curve + manual brush overrides
-     * 2. 3x3 Morphological Speckle & Interior Pinhole Cleanup (solid body, zero card bleed-through!)
-     * 3. Connected-Component Solid Filter (removes stray shredded scraps < 3.5% of main object!)
-     * 4. 1-Pass Border-Only Anti-Aliasing + exact (uprightFullPhoto.width, uprightFullPhoto.height) ARGB_8888
+     * Builds Full-HD 1:1 transparent subject cutout + alphaMaskBitmap (v2.8.0-native Studio Matte):
+     * - Layer 3 = Exact Layer 1 photo with ONLY the background removed (pure 0x00000000)!
+     * - Uses Fast O(N) Edge-Aware Guided Filter guided by the actual Layer 1 RGB luminance so boundaries
+     *   snap pixel-accurately onto motorcycles, mirrors, handlebars, hair, and dark objects WITHOUT
+     *   destructive morphological erosion!
+     * - Respects Sensitivity slider, Edge Feather slider, and manual Rapikan Kuas brush strokes.
      */
     fun buildTransparentObjectCutoutWithMask(
         uprightFullPhoto: Bitmap,
@@ -383,10 +384,7 @@ object SpotyFlowDepthEngine {
         if (maskW <= 0 || maskH <= 0 || rawConfidence.size < maskW * maskH) return null
 
         val sens = sensitivity.coerceIn(0.15f, 0.85f)
-        val featherSpan = 0.03f + edgeFeather.coerceIn(0f, 1f) * 0.22f
-        val low = (sens - featherSpan).coerceAtLeast(0.04f)
-        val high = (sens + featherSpan).coerceAtMost(0.96f)
-        val invRange = 1f / (high - low).coerceAtLeast(0.01f)
+        val feather = edgeFeather.coerceIn(0f, 1f)
         val total = maskW * maskH
 
         val brushPixels: IntArray? = if (manualBrushMask != null && !manualBrushMask.isRecycled) {
@@ -403,16 +401,43 @@ object SpotyFlowDepthEngine {
             null
         }
 
-        // Stage 1: Smoothstep S-curve + manual brush
-        val work = FloatArray(total)
+        // Stage 1: Guided Edge-Aware Alpha Matting guided by Layer 1's actual RGB luminance
+        val guideLum = extractLuminance(uprightFullPhoto, maskW, maskH)
+        val guided = guidedFilterAlpha(
+            guide = guideLum,
+            srcAlpha = rawConfidence,
+            w = maskW,
+            h = maskH,
+            radius = if (max(maskW, maskH) >= 720) 4 else 3,
+            eps = 0.0022f
+        )
+
+        // Stage 2: Clean Alpha Curve (neutral around 0.48-0.52 preserves full studio edges!) + Manual Brush
+        val isNeutral = kotlin.math.abs(sens - 0.50f) < 0.03f
+        val bias = (0.50f - sens) * 0.85f
+        val span = 0.025f + feather * 0.14f
+        val low = (0.50f - bias - span).coerceAtLeast(0.02f)
+        val high = (0.50f - bias + span).coerceAtMost(0.98f)
+        val invRange = 1f / (high - low).coerceAtLeast(0.01f)
+
+        val maskPixels = IntArray(total)
         for (i in 0 until total) {
-            val c = rawConfidence[i]
-            var a = when {
-                c <= low -> 0f
-                c >= high -> 1f
-                else -> {
-                    val t = ((c - low) * invRange).coerceIn(0f, 1f)
-                    t * t * (3f - 2f * t)
+            var a = guided[i].coerceIn(0f, 1f)
+            if (isNeutral) {
+                // Keep exact Guided-Filter neural alpha; snap micro-haze (<4%) to pure 0 and solid (>96%) to 1
+                a = when {
+                    a < 0.04f -> 0f
+                    a > 0.96f -> 1f
+                    else -> a
+                }
+            } else {
+                a = when {
+                    a <= low -> 0f
+                    a >= high -> 1f
+                    else -> {
+                        val t = ((a - low) * invRange).coerceIn(0f, 1f)
+                        t * t * (3f - 2f * t)
+                    }
                 }
             }
             if (brushPixels != null) {
@@ -424,97 +449,8 @@ object SpotyFlowDepthEngine {
                     a = if (bg > br) 1f else 0f
                 }
             }
-            work[i] = a
-        }
-
-        // Stage 2: 3x3 Morphological Speckle & Pinhole Cleanup
-        val cleaned = FloatArray(total)
-        for (y in 0 until maskH) {
-            val y0 = (y - 1).coerceAtLeast(0)
-            val y1 = (y + 1).coerceAtMost(maskH - 1)
-            for (x in 0 until maskW) {
-                val idx = y * maskW + x
-                val cur = work[idx]
-                val x0 = (x - 1).coerceAtLeast(0)
-                val x1 = (x + 1).coerceAtMost(maskW - 1)
-                var highN = 0
-                var sum = 0f
-                for (ny in y0..y1) {
-                    val nr = ny * maskW
-                    for (nx in x0..x1) {
-                        val v = work[nr + nx]
-                        sum += v
-                        if (v >= 0.55f) highN++
-                    }
-                }
-                cleaned[idx] = when {
-                    cur > 0.10f && highN <= 2 -> 0f
-                    cur < 0.85f && highN >= 7 -> 1f
-                    cur in 0.04f..0.96f -> (((sum / 9f) - 0.18f) / 0.64f).coerceIn(0f, 1f)
-                    else -> cur
-                }
-            }
-        }
-
-        // Stage 3: Connected-Component Solid Filter (kills disconnected floating scraps!)
-        val labels = IntArray(total)
-        val queue = IntArray(total)
-        val compSizes = ArrayList<Int>(64).apply { add(0) }
-        var nextLabel = 1
-        var maxComp = 0
-        for (i in 0 until total) {
-            if (cleaned[i] < 0.45f || labels[i] != 0) continue
-            val lbl = nextLabel++
-            var hd = 0
-            var tl = 0
-            labels[i] = lbl
-            queue[tl++] = i
-            while (hd < tl) {
-                val cur = queue[hd++]
-                val cx = cur % maskW
-                val cy = cur / maskW
-                if (cx > 0 && cleaned[cur - 1] >= 0.45f && labels[cur - 1] == 0) { labels[cur - 1] = lbl; queue[tl++] = cur - 1 }
-                if (cx < maskW - 1 && cleaned[cur + 1] >= 0.45f && labels[cur + 1] == 0) { labels[cur + 1] = lbl; queue[tl++] = cur + 1 }
-                if (cy > 0 && cleaned[cur - maskW] >= 0.45f && labels[cur - maskW] == 0) { labels[cur - maskW] = lbl; queue[tl++] = cur - maskW }
-                if (cy < maskH - 1 && cleaned[cur + maskW] >= 0.45f && labels[cur + maskW] == 0) { labels[cur + maskW] = lbl; queue[tl++] = cur + maskW }
-            }
-            compSizes.add(tl)
-            if (tl > maxComp) maxComp = tl
-        }
-        val minKeep = max(24, (maxComp * 0.035f).toInt())
-        for (i in 0 until total) {
-            val lbl = labels[i]
-            if (lbl > 0 && compSizes[lbl] < minKeep) cleaned[i] = 0f
-        }
-
-        // Stage 4: 1-Pass Border-Only Anti-Aliasing
-        val maskPixels = IntArray(total)
-        for (y in 0 until maskH) {
-            val yp = (y - 1).coerceAtLeast(0)
-            val yn = (y + 1).coerceAtMost(maskH - 1)
-            val row = y * maskW
-            for (x in 0 until maskW) {
-                val i = row + x
-                val c = cleaned[i]
-                val up = cleaned[yp * maskW + x]
-                val dn = cleaned[yn * maskW + x]
-                val lf = cleaned[row + (x - 1).coerceAtLeast(0)]
-                val rt = cleaned[row + (x + 1).coerceAtMost(maskW - 1)]
-                val v = if (c >= 0.99f && min(min(up, dn), min(lf, rt)) >= 0.99f) {
-                    1f
-                } else if (c <= 0.01f && max(max(up, dn), max(lf, rt)) <= 0.01f) {
-                    0f
-                } else {
-                    val b = c * 0.46f + (up + dn + lf + rt) * 0.135f
-                    when {
-                        b < 0.06f -> 0f
-                        b > 0.94f -> 1f
-                        else -> b
-                    }
-                }
-                val alphaInt = (v * 255f).roundToInt().coerceIn(0, 255)
-                maskPixels[i] = if (alphaInt <= 4) 0x00000000 else (alphaInt shl 24) or 0x00FFFFFF
-            }
+            val alphaInt = (a * 255f).roundToInt().coerceIn(0, 255)
+            maskPixels[i] = if (alphaInt <= 4) 0x00000000 else (alphaInt shl 24) or 0x00FFFFFF
         }
 
         val alphaMaskBmp = Bitmap.createBitmap(maskW, maskH, Bitmap.Config.ARGB_8888).apply {
@@ -522,6 +458,7 @@ object SpotyFlowDepthEngine {
             setPixels(maskPixels, 0, maskW, 0, 0, maskW, maskH)
         }
 
+        // Layer 3: Exact 1:1 pixel-aligned copy of Layer 1 with ONLY the background removed
         val cutoutBmp = Bitmap.createBitmap(
             uprightFullPhoto.width,
             uprightFullPhoto.height,
@@ -539,6 +476,107 @@ object SpotyFlowDepthEngine {
         canvas.drawBitmap(alphaMaskBmp, null, dstRect, maskPaint)
 
         return CutoutBundle(cutoutBitmap = cutoutBmp, alphaMaskBitmap = alphaMaskBmp)
+    }
+
+    private fun extractLuminance(photo: Bitmap, w: Int, h: Int): FloatArray {
+        val scaled = if (photo.width != w || photo.height != h) {
+            Bitmap.createScaledBitmap(photo, w, h, true)
+        } else {
+            photo
+        }
+        val total = w * h
+        val px = IntArray(total)
+        scaled.getPixels(px, 0, w, 0, 0, w, h)
+        if (scaled !== photo) scaled.recycle()
+        val lum = FloatArray(total)
+        for (i in 0 until total) {
+            val c = px[i]
+            val r = ((c ushr 16) and 0xFF) / 255f
+            val g = ((c ushr 8) and 0xFF) / 255f
+            val b = (c and 0xFF) / 255f
+            lum[i] = 0.299f * r + 0.587f * g + 0.114f * b
+        }
+        return lum
+    }
+
+    private fun boxMean(src: FloatArray, w: Int, h: Int, r: Int): FloatArray {
+        val tmp = FloatArray(w * h)
+        val out = FloatArray(w * h)
+        // Horizontal pass
+        for (y in 0 until h) {
+            val row = y * w
+            var sum = 0f
+            var cnt = 0
+            for (x in 0..min(r, w - 1)) {
+                sum += src[row + x]
+                cnt++
+            }
+            for (x in 0 until w) {
+                tmp[row + x] = sum / cnt
+                val addX = x + r + 1
+                if (addX < w) { sum += src[row + addX]; cnt++ }
+                val remX = x - r
+                if (remX >= 0) { sum -= src[row + remX]; cnt-- }
+            }
+        }
+        // Vertical pass
+        for (x in 0 until w) {
+            var sum = 0f
+            var cnt = 0
+            for (y in 0..min(r, h - 1)) {
+                sum += tmp[y * w + x]
+                cnt++
+            }
+            for (y in 0 until h) {
+                out[y * w + x] = sum / cnt
+                val addY = y + r + 1
+                if (addY < h) { sum += tmp[addY * w + x]; cnt++ }
+                val remY = y - r
+                if (remY >= 0) { sum -= tmp[remY * w + x]; cnt-- }
+            }
+        }
+        return out
+    }
+
+    private fun guidedFilterAlpha(
+        guide: FloatArray,
+        srcAlpha: FloatArray,
+        w: Int,
+        h: Int,
+        radius: Int,
+        eps: Float
+    ): FloatArray {
+        val total = w * h
+        val meanI = boxMean(guide, w, h, radius)
+        val meanP = boxMean(srcAlpha, w, h, radius)
+        val ii = FloatArray(total) { guide[it] * guide[it] }
+        val ip = FloatArray(total) { guide[it] * srcAlpha[it] }
+        val corrI = boxMean(ii, w, h, radius)
+        val corrIP = boxMean(ip, w, h, radius)
+
+        val a = FloatArray(total)
+        val b = FloatArray(total)
+        for (i in 0 until total) {
+            val varI = (corrI[i] - meanI[i] * meanI[i]).coerceAtLeast(0f)
+            val covIP = corrIP[i] - meanI[i] * meanP[i]
+            val ai = covIP / (varI + eps)
+            a[i] = ai
+            b[i] = meanP[i] - ai * meanI[i]
+        }
+        val meanA = boxMean(a, w, h, radius)
+        val meanB = boxMean(b, w, h, radius)
+
+        val result = FloatArray(total)
+        for (i in 0 until total) {
+            val orig = srcAlpha[i]
+            // Only apply edge-snapping in boundary transition band; preserve solid interior & pure bg 100%!
+            result[i] = when {
+                orig >= 0.985f -> 1f
+                orig <= 0.015f -> 0f
+                else -> (meanA[i] * guide[i] + meanB[i]).coerceIn(0f, 1f)
+            }
+        }
+        return result
     }
 
     /**
