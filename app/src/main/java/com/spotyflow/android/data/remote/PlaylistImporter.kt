@@ -29,7 +29,7 @@ object PlaylistImporter {
             val listId = ytListMatch.groupValues[1]
             val browseId = if (listId.startsWith("VL")) listId else "VL$listId"
             val col = InnerTubeMusicClient.fetchCollectionDetail(browseId, "Playlist YouTube")
-            if (col.tracks.isNotEmpty()) {
+            if (col != null && col.tracks.isNotEmpty()) {
                 return@withContext ImportedPlaylistResult(
                     title = col.title.ifBlank { "Impor YouTube Music" },
                     tracks = col.tracks,
