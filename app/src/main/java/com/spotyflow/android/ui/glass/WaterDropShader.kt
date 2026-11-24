@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
+import com.spotyflow.android.data.local.WaterDropDensity
 import kotlin.math.PI
 import kotlin.math.sin
 
@@ -278,7 +279,8 @@ fun SpotyWaterDropsOverlay(
     rippleCenterX: Float,
     rippleProgress: Float,
     modifier: Modifier = Modifier,
-    enabled: Boolean = true
+    enabled: Boolean = true,
+    density: WaterDropDensity = WaterDropDensity.FULL
 ) {
     if (!enabled) return
 
@@ -293,13 +295,17 @@ fun SpotyWaterDropsOverlay(
         label = "dropletBreathPhase"
     )
 
+    val visibleDrops = remember(density) {
+        NAVBAR_MICRO_DROPS.take(density.dropCount.coerceIn(1, NAVBAR_MICRO_DROPS.size))
+    }
+
     Canvas(modifier = modifier.fillMaxSize()) {
         val w = size.width
         val h = size.height
         if (w <= 0f || h <= 0f) return@Canvas
 
         // 1. Static & Breathing Organic Edge Dew Droplets (4-layer real water optics)
-        NAVBAR_MICRO_DROPS.forEach { drop ->
+        visibleDrops.forEach { drop ->
             val breath = 1f + sin(breathPhase + drop.phaseOffset) * 0.045f
             val baseR = drop.radiusDp.dp.toPx() * breath
             val cx = w * drop.normX
@@ -308,7 +314,7 @@ fun SpotyWaterDropsOverlay(
                 center = Offset(cx, cy),
                 rx = baseR * drop.aspectX,
                 ry = baseR * drop.aspectY,
-                alphaScale = 0.94f
+                alphaScale = 0.94f * density.alphaScale
             )
         }
 

@@ -1,5 +1,6 @@
 package com.spotyflow.android.data.remote
 
+import com.spotyflow.android.data.local.OfflineDownloadManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -62,9 +63,26 @@ object FastStreamResolver {
         }
     }
 
-    suspend fun resolve(videoId: String, forceFallback: Boolean = false): ResolvedStream? =
+    suspend fun resolve(
+        videoId: String,
+        forceFallback: Boolean = false,
+        skipOfflineLookup: Boolean = false
+    ): ResolvedStream? =
         withContext(Dispatchers.IO) {
             if (videoId.length != 11) return@withContext null
+
+            // Priority #0 (0ms): Local Offline M4A File — instant playback without internet!
+            if (!skipOfflineLookup) {
+                val offlineUri = OfflineDownloadManager.getOfflineFileUri(videoId)
+                if (!offlineUri.isNullOrBlank()) {
+                    return@withContext ResolvedStream(
+                        videoId = videoId,
+                        audioUrl = offlineUri,
+                        videoUrl = ""
+                    )
+                }
+            }
+
             if (!forceFallback) {
                 getCached(videoId)?.let { return@withContext it }
             }

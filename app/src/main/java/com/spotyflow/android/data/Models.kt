@@ -142,6 +142,14 @@ data class AmbientPalette(
 sealed interface DetailDestination {
     data class Artist(val browseId: String, val artistName: String) : DetailDestination
     data class Collection(val browseId: String, val fallbackTitle: String = "", val isCustom: Boolean = false, val localKey: String? = null) : DetailDestination
+    data object Settings : DetailDestination
+    data object DynamicIsland : DetailDestination
+    data object WidgetSettings : DetailDestination
+    data object Equalizer : DetailDestination
+    data object SongRecognize : DetailDestination
+    data object ListenTogether : DetailDestination
+    data object StatsRecap : DetailDestination
+    data class Poster3D(val initialTrack: TrackItem? = null) : DetailDestination
 }
 
 data class PreviewSheetData(

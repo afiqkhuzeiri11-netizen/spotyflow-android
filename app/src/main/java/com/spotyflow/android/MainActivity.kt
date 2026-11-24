@@ -45,8 +45,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Album
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.GraphicEq
@@ -56,6 +58,7 @@ import androidx.compose.material.icons.rounded.QueuePlayNext
 import androidx.compose.material.icons.rounded.Radio
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.Widgets
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
@@ -85,8 +88,10 @@ import com.spotyflow.android.data.PreviewSheetData
 import com.spotyflow.android.data.SpotyTab
 import com.spotyflow.android.data.SpotyViewModel
 import com.spotyflow.android.data.TrackItem
+import com.spotyflow.android.data.local.AppSettingsStore
 import com.spotyflow.android.data.remote.SpotyHttpClient
 import com.spotyflow.android.player.SpotyFlowPlaybackService
+import com.spotyflow.android.poster.Poster3DStudioScreen
 import com.spotyflow.android.ui.components.SpotyLiquidDock
 import com.spotyflow.android.ui.components.SpotyMiniPlayer
 import com.spotyflow.android.ui.components.SpotyNowPlayingSheet
@@ -98,13 +103,20 @@ import com.spotyflow.android.ui.glass.SpotyFloatingGlass
 import com.spotyflow.android.ui.glass.SpotyGlassCircleButton
 import com.spotyflow.android.ui.screens.ArtistProfileScreen
 import com.spotyflow.android.ui.screens.CollectionDetailScreen
+import com.spotyflow.android.ui.screens.DynamicIslandSettingsScreen
+import com.spotyflow.android.ui.screens.EqualizerScreen
 import com.spotyflow.android.ui.screens.HomeScreen
 import com.spotyflow.android.ui.screens.LibraryScreen
+import com.spotyflow.android.ui.screens.ListenTogetherScreen
 import com.spotyflow.android.ui.screens.ProfileScreen
 import com.spotyflow.android.ui.screens.SearchScreen
+import com.spotyflow.android.ui.screens.SettingsRootScreen
+import com.spotyflow.android.ui.screens.SongRecognizeScreen
+import com.spotyflow.android.ui.screens.StatsRecapScreen
 import com.spotyflow.android.ui.theme.SpotyColors
 import com.spotyflow.android.ui.theme.SpotySpacing
 import com.spotyflow.android.ui.theme.SpotyTheme
+import com.spotyflow.android.widget.WidgetSettingsScreen
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import java.util.Calendar
@@ -131,10 +143,18 @@ class MainActivity : ComponentActivity() {
 
         SpotyFlowPlaybackService.ensureNotificationChannels(this)
         SpotyHttpClient.warmUpAsync()
+        AppSettingsStore.load(this)
         requestRuntimePermissionsOnce()
 
         setContent {
-            SpotyTheme {
+            val appSettings by AppSettingsStore.settings.collectAsState()
+            SpotyTheme(
+                themeMode = appSettings.themeMode,
+                uiStyle = appSettings.uiStyle,
+                glassBlurEnabled = appSettings.glassBlurEnabled,
+                glassLensEnabled = appSettings.glassLensEnabled,
+                accentHex = appSettings.accentHex
+            ) {
                 SpotyFlowApp()
             }
         }
@@ -268,6 +288,60 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
                             onOpenArtist = { bId, name -> vm.openArtistProfile(bId, name) },
                             onOpenTrackMenu = vm::openTrackMenu
                         )
+
+                        DetailDestination.Settings -> SettingsRootScreen(
+                            onBack = { vm.popDetail() },
+                            onOpenDynamicIsland = vm::openDynamicIslandSettings,
+                            onOpenWidgetSettings = vm::openWidgetSettings,
+                            onOpenEqualizer = vm::openEqualizer,
+                            onImportPlaylistUrl = vm::importPlaylistFromUrl,
+                            onClearHistory = vm::clearAllHistory,
+                            onShowToast = vm::showToast
+                        )
+
+                        DetailDestination.DynamicIsland -> DynamicIslandSettingsScreen(
+                            uiState = uiState,
+                            onBack = { vm.popDetail() },
+                            onShowToast = vm::showToast
+                        )
+
+                        DetailDestination.WidgetSettings -> WidgetSettingsScreen(
+                            uiState = uiState,
+                            onBack = { vm.popDetail() },
+                            onShowToast = vm::showToast
+                        )
+
+                        DetailDestination.Equalizer -> EqualizerScreen(
+                            onBack = { vm.popDetail() }
+                        )
+
+                        DetailDestination.SongRecognize -> SongRecognizeScreen(
+                            onBack = { vm.popDetail() },
+                            onPlayTrack = vm::playTrack,
+                            onShowToast = vm::showToast
+                        )
+
+                        DetailDestination.ListenTogether -> ListenTogetherScreen(
+                            uiState = uiState,
+                            onBack = { vm.popDetail() },
+                            onPlayTrack = vm::playTrack,
+                            onShowToast = vm::showToast
+                        )
+
+                        DetailDestination.StatsRecap -> StatsRecapScreen(
+                            uiState = uiState,
+                            topTracks = vm.getTop50Tracks(),
+                            onBack = { vm.popDetail() },
+                            onPlayTrack = vm::playTrack,
+                            onShowToast = vm::showToast
+                        )
+
+                        is DetailDestination.Poster3D -> Poster3DStudioScreen(
+                            uiState = uiState,
+                            initialTrack = activeDetail.initialTrack,
+                            onBack = { vm.popDetail() },
+                            onShowToast = vm::showToast
+                        )
                     }
                 } else {
                     AnimatedContent(
@@ -307,8 +381,12 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
                                 onOpenLocalCollection = vm::openLocalCollection,
                                 onOpenCustomPlaylist = vm::openCustomPlaylist,
                                 onOpenSavedCollection = { c -> vm.openCollectionDetail(c.browseId, c.title) },
+                                onOpenArtist = { a -> vm.openArtistProfile(a.browseId, a.name) },
+                                onPlayTrack = vm::playTrack,
                                 onCreatePlaylist = { title -> vm.createPlaylist(title) },
-                                onOpenPreview = vm::openPreviewSheet
+                                onDeletePlaylist = vm::deletePlaylist,
+                                onImportPlaylistUrl = vm::importPlaylistFromUrl,
+                                onAddUploadedUris = vm::addUploadedAudioUris
                             )
 
                             SpotyTab.Profile -> ProfileScreen(
@@ -319,7 +397,14 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
                                 onOpenLocalCollection = vm::openLocalCollection,
                                 onOpenArtist = { a -> vm.openArtistProfile(a.browseId, a.name) },
                                 onOpenLibraryTab = { vm.selectTab(SpotyTab.Library) },
-                                onOpenPreview = vm::openPreviewSheet
+                                onOpenPoster3D = { vm.openPoster3D() },
+                                onOpenStatsRecap = vm::openStatsRecap,
+                                onOpenListenTogether = vm::openListenTogether,
+                                onOpenSongRecognize = vm::openSongRecognize,
+                                onOpenEqualizer = vm::openEqualizer,
+                                onOpenDynamicIsland = vm::openDynamicIslandSettings,
+                                onOpenWidgetSettings = vm::openWidgetSettings,
+                                onOpenSettings = vm::openSettings
                             )
                         }
                     }
@@ -335,17 +420,8 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
             if (uiState.currentDetail == null) {
                 TopGlassBar(
                     activeTab = uiState.activeTab,
-                    onRecognizeClick = {
-                        vm.openPreviewSheet(
-                            PreviewSheetData(
-                                title = "Kenali Lagu",
-                                subtitle = "Deteksi lagu lewat mikrofon & radar (hadir penuh di Tahap 3)",
-                                badge = "AUDIO RADAR",
-                                bullets = listOf("Mencocokkan lirik ke LRCLIB + YouTube Music")
-                            )
-                        )
-                    },
-                    onSettingsClick = { vm.selectTab(SpotyTab.Profile) },
+                    onRecognizeClick = vm::openSongRecognize,
+                    onSettingsClick = vm::openSettings,
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .fillMaxWidth()
@@ -355,27 +431,32 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
             }
 
             // Floating Bottom Stack: Mini-Player + 10.dp Gap + Real Water Drops Liquid Glass Navbar
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(bottom = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                SpotyMiniPlayer(
-                    uiState = uiState,
-                    onOpenNowPlaying = { vm.openNowPlaying(false) },
-                    onToggleLike = { vm.toggleLike() },
-                    onTogglePlayPause = vm::togglePlayPause,
-                    onNext = vm::nextTrack
-                )
+            // Hidden inside fullscreen Poster3DStudioScreen so user gets unobstructed canvas!
+            if (uiState.currentDetail !is DetailDestination.Poster3D) {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(bottom = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    SpotyMiniPlayer(
+                        uiState = uiState,
+                        onOpenNowPlaying = { vm.openNowPlaying(false) },
+                        onToggleLike = { vm.toggleLike() },
+                        onTogglePlayPause = vm::togglePlayPause,
+                        onNext = vm::nextTrack
+                    )
 
-                SpotyLiquidDock(
-                    activeTab = uiState.activeTab,
-                    onSelectTab = vm::selectTab,
-                    waterDropsEnabled = uiState.waterDropsEnabled
-                )
+                    SpotyLiquidDock(
+                        activeTab = uiState.activeTab,
+                        onSelectTab = vm::selectTab,
+                        waterDropsEnabled = uiState.appSettings.waterDropsEnabled,
+                        waterDropDensity = uiState.appSettings.waterDropsDensity,
+                        glassLensEnabled = uiState.appSettings.glassLensEnabled
+                    )
+                }
             }
 
             // Fullscreen Interactive Now Playing Sheet
@@ -411,6 +492,8 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
                     onOpenQueue = { vm.setQueueSheetOpen(true) },
                     onOpenArtist = { bId, name -> vm.openArtistProfile(bId, name) },
                     onOpenTrackMenu = vm::openTrackMenu,
+                    onOpenPoster3D = { t -> vm.openPoster3D(t) },
+                    onStartSleepTimer = vm::startSleepTimer,
                     onOpenPreview = vm::openPreviewSheet
                 )
             }
@@ -470,6 +553,16 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
                         onStartRadio = {
                             vm.closeTrackMenu()
                             vm.startRadioForTrack(track)
+                        },
+                        onDownloadOffline = {
+                            vm.closeTrackMenu()
+                            vm.downloadTrackOffline(track)
+                        },
+                        onOpenPoster3D = {
+                            vm.openPoster3D(track)
+                        },
+                        onOpenWidgetSettings = {
+                            vm.openWidgetSettings()
                         },
                         onShare = {
                             vm.closeTrackMenu()
@@ -765,6 +858,9 @@ private fun TrackMenuGlassSheet(
     onOpenArtist: () -> Unit,
     onOpenAlbum: () -> Unit,
     onStartRadio: () -> Unit,
+    onDownloadOffline: () -> Unit,
+    onOpenPoster3D: () -> Unit,
+    onOpenWidgetSettings: () -> Unit,
     onShare: () -> Unit
 ) {
     Box(
@@ -855,6 +951,9 @@ private fun TrackMenuGlassSheet(
                     MenuSheetActionRow(Icons.Rounded.Album, "Lihat Album", onOpenAlbum)
                 }
                 MenuSheetActionRow(Icons.Rounded.Radio, "Mulai Radio Lagu Ini", onStartRadio)
+                MenuSheetActionRow(Icons.Rounded.Download, "Unduh Offline (M4A)", onDownloadOffline)
+                MenuSheetActionRow(Icons.Rounded.AutoAwesome, "Buat Poster Lagu 3D", onOpenPoster3D)
+                MenuSheetActionRow(Icons.Rounded.Widgets, "Pengaturan Widget", onOpenWidgetSettings)
                 MenuSheetActionRow(Icons.Rounded.Share, "Bagikan Lagu", onShare)
             }
         }

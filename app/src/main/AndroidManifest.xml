@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
@@ -41,6 +43,7 @@
             </intent-filter>
         </activity>
 
+        <!-- Native Media3 Background Playback Service -->
         <service
             android:name=".player.SpotyFlowPlaybackService"
             android:exported="true"
@@ -50,5 +53,90 @@
                 <action android:name="android.media.browse.MediaBrowserService" />
             </intent-filter>
         </service>
+
+        <!-- Stage 3 Custom Dynamic Island Pro via AccessibilityService -->
+        <service
+            android:name=".island.SpotyFlowDynamicIslandService"
+            android:label="SpotyFlow Dynamic Island"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice.accessibilityservice"
+                android:resource="@xml/spotyflow_island_accessibility" />
+        </service>
+
+        <!-- Music Alarm Receiver -->
+        <receiver
+            android:name=".player.SpotyFlowAlarmReceiver"
+            android:exported="false" />
+
+        <!-- Stage 4: 5 Dynamic Glass Home Screen Widgets (1x1, 2x2, 2x4, 4x1, 4x2) -->
+        <receiver
+            android:name=".widget.SpotyFlowPlayer1x1Provider"
+            android:label="@string/widget_1x1_label"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.spotyflow.android.ACTION_WIDGET_CMD" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_player_1x1_info" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.SpotyFlowPlayer2x2Provider"
+            android:label="@string/widget_2x2_label"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.spotyflow.android.ACTION_WIDGET_CMD" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_player_2x2_info" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.SpotyFlowPlayer2x4Provider"
+            android:label="@string/widget_2x4_label"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.spotyflow.android.ACTION_WIDGET_CMD" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_player_2x4_info" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.SpotyFlowPlayer4x1Provider"
+            android:label="@string/widget_4x1_label"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.spotyflow.android.ACTION_WIDGET_CMD" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_player_4x1_info" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.SpotyFlowPlayer4x2Provider"
+            android:label="@string/widget_4x2_label"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.spotyflow.android.ACTION_WIDGET_CMD" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_player_4x2_info" />
+        </receiver>
     </application>
 </manifest>

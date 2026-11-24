@@ -242,7 +242,8 @@ fun HomeScreen(
             }
         }
 
-        // 3. Inline Glass Streak Bar
+        // 3. Inline Glass Streak Bar (respects Settings -> showStreakOnHome)
+        if (uiState.appSettings.showStreakOnHome) {
         item(key = "streak_bar") {
             val streak = uiState.dailyStreak
             SpotyGlassCard(
@@ -326,6 +327,7 @@ fun HomeScreen(
                     }
                 }
             }
+        }
         }
 
         // 4. Section "Andalanmu" — Horizontal Glass Album Cards

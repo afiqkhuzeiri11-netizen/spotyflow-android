@@ -54,18 +54,25 @@ import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material.icons.rounded.VolumeUp
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
+import com.spotyflow.android.data.local.AppSettingsStore
+import com.spotyflow.android.data.local.LyricAlignMode
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -127,11 +134,14 @@ fun SpotyNowPlayingSheet(
     onOpenQueue: () -> Unit,
     onOpenArtist: (String, String) -> Unit,
     onOpenTrackMenu: (TrackItem) -> Unit,
+    onOpenPoster3D: (TrackItem) -> Unit,
+    onStartSleepTimer: (Int, Boolean) -> Unit,
     onOpenPreview: (PreviewSheetData) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val track = uiState.currentTrack ?: return
     val pal = uiState.ambientPalette
+    var showSleepDialog by remember { mutableStateOf(false) }
 
     BackHandler(enabled = true) {
         if (uiState.isLyricsVisible) onToggleLyrics() else onDismiss()
@@ -398,19 +408,7 @@ fun SpotyNowPlayingSheet(
                         }
 
                         SpotyGlassCircleButton(
-                            onClick = {
-                                onOpenPreview(
-                                    PreviewSheetData(
-                                        title = "Poster 3D Studio (Tahap 4)",
-                                        subtitle = "Copy objek/manusia fotomu di depan sampul musik ini",
-                                        badge = "ML KIT DEPTH",
-                                        bullets = listOf(
-                                            "Foto sendiri otomatis jadi latar belakang + objek manusia di depan kartu 3D",
-                                            "Kuas Perapi Jari + simpan Full HD ke Galeri"
-                                        )
-                                    )
-                                )
-                            },
+                            onClick = { onOpenPoster3D(track) },
                             size = 44.dp
                         ) {
                             Icon(
@@ -643,25 +641,74 @@ fun SpotyNowPlayingSheet(
                             )
                             PlayerBottomAction(
                                 icon = Icons.Rounded.Bedtime,
-                                label = "Timer Tidur",
-                                active = false,
+                                label = if (uiState.sleepTimerRemainingSec > 0) "${uiState.sleepTimerRemainingSec / 60}m" else if (uiState.sleepStopAtEndOfTrack) "Akhir" else "Timer Tidur",
+                                active = uiState.sleepTimerRemainingSec > 0 || uiState.sleepStopAtEndOfTrack,
                                 accentColor = pal.accent,
-                                onClick = {
-                                    onOpenPreview(
-                                        PreviewSheetData(
-                                            title = "Timer Tidur",
-                                            subtitle = "Kontrol penuh 15–60 mnt & memudar hadir di Tahap 3",
-                                            badge = "TIMER",
-                                            bullets = listOf("Opsi berhenti otomatis di akhir lagu saat ini")
-                                        )
-                                    )
-                                }
+                                onClick = { showSleepDialog = true }
                             )
                         }
                     }
                 }
             }
         }
+    }
+
+    if (showSleepDialog) {
+        AlertDialog(
+            onDismissRequest = { showSleepDialog = false },
+            containerColor = Color.White,
+            title = { Text("Timer Tidur", fontWeight = FontWeight.ExtraBold, color = SpotyColors.Slate900) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(15, 30, 45, 60).forEach { mins ->
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(SpotyColors.Slate900.copy(alpha = 0.06f))
+                                .clickable {
+                                    onStartSleepTimer(mins, false)
+                                    showSleepDialog = false
+                                }
+                                .padding(horizontal = 14.dp, vertical = 11.dp)
+                        ) {
+                            Text("$mins menit (memudar lembut)", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = SpotyColors.Slate900)
+                        }
+                    }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(SpotyColors.EmeraldTint)
+                            .clickable {
+                                onStartSleepTimer(0, true)
+                                showSleepDialog = false
+                            }
+                            .padding(horizontal = 14.dp, vertical = 11.dp)
+                    ) {
+                        Text("Berhenti di akhir lagu saat ini", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = SpotyColors.DeepEmerald)
+                    }
+                    if (uiState.sleepTimerRemainingSec > 0 || uiState.sleepStopAtEndOfTrack) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(SpotyColors.HeartRed.copy(alpha = 0.12f))
+                                .clickable {
+                                    onStartSleepTimer(0, false)
+                                    showSleepDialog = false
+                                }
+                                .padding(horizontal = 14.dp, vertical = 11.dp)
+                        ) {
+                            Text("Matikan Timer Tidur", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = SpotyColors.HeartRed)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showSleepDialog = false }) { Text("Tutup", color = SpotyColors.Slate500) }
+            }
+        )
     }
 }
 
@@ -724,9 +771,16 @@ private fun SyncedLyricsGlassCard(
     onTapLine: (Long) -> Unit,
     onManualSearch: () -> Unit
 ) {
+    val context = LocalContext.current
     val lines = uiState.lyricsResult.activeList
     val activeIdx = uiState.activeLyricIndex
     val listState = rememberLazyListState()
+    val s = uiState.appSettings
+    val textAlign = when (s.lyricsAlign) {
+        LyricAlignMode.LEFT -> TextAlign.Start
+        LyricAlignMode.CENTER -> TextAlign.Center
+        LyricAlignMode.RIGHT -> TextAlign.End
+    }
 
     LaunchedEffect(activeIdx, uiState.lyricsResult.isSynced) {
         if (lines.isNotEmpty() && uiState.lyricsResult.isSynced) {
@@ -749,41 +803,24 @@ private fun SyncedLyricsGlassCard(
                     ) {
                         CircularProgressIndicator(color = SpotyColors.EmeraldCrystal)
                         Spacer(modifier = Modifier.height(10.dp))
-                        Text(
-                            text = "Mencari lirik sinkron...",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = SpotyColors.Slate500
-                        )
+                        Text("Mencari lirik sinkron...", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = SpotyColors.Slate500)
                     }
                 }
                 lines.isEmpty() -> {
                     Column(
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .padding(24.dp),
+                        modifier = Modifier.align(Alignment.Center).padding(24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Text(
-                            text = "Lirik belum ditemukan",
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = SpotyColors.Slate900
-                        )
+                        Text("Lirik belum ditemukan", fontSize = 17.sp, fontWeight = FontWeight.ExtraBold, color = SpotyColors.Slate900)
                         Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "Ketuk Cari Manual di bawah untuk memasukkan judul & artis.",
-                            fontSize = 13.sp,
-                            color = SpotyColors.Slate500,
-                            textAlign = TextAlign.Center
-                        )
+                        Text("Ketuk Cari Manual di bawah untuk memasukkan judul & artis.", fontSize = 13.sp, color = SpotyColors.Slate500, textAlign = TextAlign.Center)
                     }
                 }
                 else -> {
                     LazyColumn(
                         state = listState,
-                        contentPadding = PaddingValues(start = 22.dp, end = 22.dp, top = 24.dp, bottom = 72.dp),
-                        verticalArrangement = Arrangement.spacedBy(18.dp),
+                        contentPadding = PaddingValues(start = 22.dp, end = 22.dp, top = 20.dp, bottom = 78.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
                         itemsIndexed(lines) { idx, line ->
@@ -793,13 +830,10 @@ private fun SyncedLyricsGlassCard(
                                 animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
                                 label = "lyricScale_$idx"
                             )
-                            Text(
-                                text = line.text,
-                                fontSize = if (isActive) 22.sp else 18.sp,
-                                lineHeight = if (isActive) 29.sp else 24.sp,
-                                fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.SemiBold,
-                                color = if (isActive || !uiState.lyricsResult.isSynced) SpotyColors.Slate900
-                                else SpotyColors.Slate500.copy(alpha = 0.55f),
+                            val inactiveAlpha = if (s.lyricsBlurInactive) 0.42f else 0.66f
+                            val romText = uiState.romanizedLyrics.getOrNull(idx).orEmpty()
+                            val trText = uiState.translatedLyrics.getOrNull(idx).orEmpty()
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .graphicsLayer {
@@ -809,40 +843,100 @@ private fun SyncedLyricsGlassCard(
                                     .clip(RoundedCornerShape(12.dp))
                                     .clickable { onTapLine(line.timeMs) }
                                     .padding(vertical = 2.dp)
-                            )
+                            ) {
+                                Text(
+                                    text = line.text,
+                                    fontSize = if (isActive) 21.sp else 17.5.sp,
+                                    lineHeight = if (isActive) 28.sp else 23.sp,
+                                    fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                    textAlign = textAlign,
+                                    color = if (isActive || !uiState.lyricsResult.isSynced) SpotyColors.Slate900
+                                    else SpotyColors.Slate500.copy(alpha = inactiveAlpha),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                if (romText.isNotBlank() && romText != line.text) {
+                                    Text(
+                                        text = romText,
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        textAlign = textAlign,
+                                        color = SpotyColors.DeepEmerald.copy(alpha = if (isActive) 0.95f else 0.55f),
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                                if (trText.isNotBlank() && trText != line.text) {
+                                    Text(
+                                        text = trText,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Normal,
+                                        textAlign = textAlign,
+                                        color = SpotyColors.Slate700.copy(alpha = if (isActive) 0.90f else 0.50f),
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            // Bottom floating Manual Search pill inside Lyrics card
-            Box(
+            // Bottom Floating Lyrics Toolbar: Translate | Romanize | Offset | Cari Manual
+            Row(
                 modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(12.dp)
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(SpotyColors.Slate900)
-                    .clickable(onClick = onManualSearch)
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                LyricToolChip(
+                    label = "Terjemah",
+                    active = s.lyricsAutoTranslate,
+                    onClick = { AppSettingsStore.update(context) { it.copy(lyricsAutoTranslate = !it.lyricsAutoTranslate) } }
+                )
+                LyricToolChip(
+                    label = "Roman",
+                    active = s.lyricsAutoRomanize,
+                    onClick = { AppSettingsStore.update(context) { it.copy(lyricsAutoRomanize = !it.lyricsAutoRomanize) } }
+                )
+                LyricToolChip(
+                    label = String.format(java.util.Locale.US, "%+.1fs", s.lyricsOffsetMs / 1000f),
+                    active = s.lyricsOffsetMs != 0L,
+                    onClick = {
+                        val next = when {
+                            s.lyricsOffsetMs >= 1500L -> -1500L
+                            else -> s.lyricsOffsetMs + 500L
+                        }
+                        AppSettingsStore.update(context) { it.copy(lyricsOffsetMs = next) }
+                    }
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(SpotyColors.Slate900)
+                        .clickable(onClick = onManualSearch)
+                        .padding(horizontal = 12.dp, vertical = 7.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Search,
-                        contentDescription = "Cari Manual",
-                        tint = Color.White,
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Text(
-                        text = "Cari Manual",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Icon(Icons.Rounded.Search, contentDescription = "Cari Manual", tint = Color.White, modifier = Modifier.size(14.dp))
+                        Text("Cari", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun LyricToolChip(label: String, active: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(if (active) SpotyColors.EmeraldCrystal else SpotyColors.Slate900.copy(alpha = 0.08f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 7.dp)
+    ) {
+        Text(label, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = if (active) Color.White else SpotyColors.Slate900)
     }
 }

@@ -38,6 +38,7 @@ class LocalLibraryStore(private val context: Context) {
         private const val KEY_SEARCH_HISTORY = "search_history"
         private const val KEY_STREAK = "daily_streak"
         private const val KEY_WATER_DROPS = "pref_water_drops"
+        private const val KEY_UPLOADED = "uploaded_tracks"
     }
 
     fun getUserProfile(): UserProfile {
@@ -216,7 +217,7 @@ class LocalLibraryStore(private val context: Context) {
 
     fun addTrackToPlaylist(playlistId: String, track: TrackItem): List<CustomPlaylist> {
         val list = getCustomPlaylists().map { pl ->
-            if (pl.id == playlistId && pl.tracks.none { it.videoId == track.videoId }) {
+            if (pl.id == playlistId && pl.tracks.none { it.videoId == track.videoId && track.videoId.isNotBlank() || it.id == track.id }) {
                 pl.copy(tracks = pl.tracks + track)
             } else {
                 pl
@@ -224,6 +225,68 @@ class LocalLibraryStore(private val context: Context) {
         }
         saveCustomPlaylists(list)
         return list
+    }
+
+    fun renamePlaylist(playlistId: String, newTitle: String): List<CustomPlaylist> {
+        val clean = newTitle.trim()
+        if (clean.isBlank()) return getCustomPlaylists()
+        val list = getCustomPlaylists().map { pl ->
+            if (pl.id == playlistId) pl.copy(title = clean) else pl
+        }
+        saveCustomPlaylists(list)
+        return list
+    }
+
+    fun deletePlaylist(playlistId: String): List<CustomPlaylist> {
+        val list = getCustomPlaylists().filterNot { it.id == playlistId }
+        saveCustomPlaylists(list)
+        return list
+    }
+
+    fun removeTrackFromPlaylist(playlistId: String, trackId: String): List<CustomPlaylist> {
+        val list = getCustomPlaylists().map { pl ->
+            if (pl.id == playlistId) pl.copy(tracks = pl.tracks.filterNot { it.id == trackId }) else pl
+        }
+        saveCustomPlaylists(list)
+        return list
+    }
+
+    fun removeDuplicatesFromPlaylist(playlistId: String): List<CustomPlaylist> {
+        val list = getCustomPlaylists().map { pl ->
+            if (pl.id == playlistId) {
+                val seen = HashSet<String>()
+                val deduped = pl.tracks.filter { t ->
+                    val k = t.videoId.ifBlank { "${t.title.lowercase()}|${t.artist.lowercase()}" }
+                    seen.add(k)
+                }
+                pl.copy(tracks = deduped)
+            } else {
+                pl
+            }
+        }
+        saveCustomPlaylists(list)
+        return list
+    }
+
+    fun getUploadedTracks(): List<TrackItem> = readTrackList(KEY_UPLOADED)
+
+    fun addUploadedTracks(newTracks: List<TrackItem>): List<TrackItem> {
+        val existing = getUploadedTracks().toMutableList()
+        newTracks.forEach { t ->
+            if (existing.none { it.localUri == t.localUri && t.localUri.isNotBlank() }) {
+                existing.add(0, t)
+            }
+        }
+        writeTrackList(KEY_UPLOADED, existing)
+        return existing
+    }
+
+    fun clearRecentHistory() {
+        prefs.edit().remove(KEY_RECENT).apply()
+    }
+
+    fun clearSearchHistory() {
+        prefs.edit().remove(KEY_SEARCH_HISTORY).apply()
     }
 
     fun getRecentTracks(): List<TrackItem> = readTrackList(KEY_RECENT)

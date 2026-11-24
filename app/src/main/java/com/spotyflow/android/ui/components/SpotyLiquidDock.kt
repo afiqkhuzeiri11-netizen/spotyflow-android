@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.spotyflow.android.data.SpotyTab
+import com.spotyflow.android.data.local.WaterDropDensity
 import com.spotyflow.android.ui.glass.SpotyFloatingGlass
 import com.spotyflow.android.ui.glass.SpotyWaterDropsOverlay
 import com.spotyflow.android.ui.glass.rememberWaterDropRenderEffect
@@ -98,7 +99,9 @@ fun SpotyLiquidDock(
     activeTab: SpotyTab,
     onSelectTab: (SpotyTab) -> Unit,
     modifier: Modifier = Modifier,
-    waterDropsEnabled: Boolean = true
+    waterDropsEnabled: Boolean = true,
+    waterDropDensity: WaterDropDensity = WaterDropDensity.FULL,
+    glassLensEnabled: Boolean = true
 ) {
     val tabs = remember { SpotyTab.entries }
     val haptic = LocalHapticFeedback.current
@@ -199,7 +202,7 @@ fun SpotyLiquidDock(
                 rippleCenterX = rippleCenterX,
                 rippleCenterY = innerHeightPx * 0.5f,
                 rippleProgress = rippleProgress.value,
-                enabled = waterDropsEnabled
+                enabled = waterDropsEnabled && glassLensEnabled
             )
 
             Box(
@@ -441,6 +444,7 @@ fun SpotyLiquidDock(
                     rippleCenterX = rippleCenterX,
                     rippleProgress = rippleProgress.value,
                     enabled = waterDropsEnabled,
+                    density = waterDropDensity,
                     modifier = Modifier.fillMaxSize()
                 )
             }

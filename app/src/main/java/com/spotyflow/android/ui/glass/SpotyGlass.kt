@@ -42,6 +42,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.spotyflow.android.data.local.UiStyleMode
+import com.spotyflow.android.ui.theme.LocalSpotyAppearance
 import com.spotyflow.android.ui.theme.SpotyColors
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.HazeStyle
@@ -83,13 +85,22 @@ fun SpotyGlassCard(
     onClick: (() -> Unit)? = null,
     content: @Composable BoxScope.() -> Unit
 ) {
-    val style = remember(tintAlpha) {
+    val app = LocalSpotyAppearance.current
+    val useGlassBlur = hazeState != null && app.glassBlurEnabled && app.uiStyle == UiStyleMode.GLASS
+    val tintColor = if (app.isDark) Color(0xFF171A24).copy(alpha = (tintAlpha + 0.14f).coerceAtMost(0.92f)) else Color.White.copy(alpha = tintAlpha)
+    val style = remember(tintAlpha, app.canvasBackground, app.isDark) {
         HazeStyle(
-            backgroundColor = SpotyColors.PureWhiteCanvas,
-            tints = listOf(HazeTint(color = Color.White.copy(alpha = tintAlpha))),
+            backgroundColor = app.canvasBackground,
+            tints = listOf(HazeTint(color = tintColor)),
             blurRadius = 18.dp,
             noiseFactor = 0.02f
         )
+    }
+    val fallbackFill = if (app.isDark) Color(0xFF171A24).copy(alpha = 0.92f) else Color.White.copy(alpha = 0.90f)
+    val rimBrush = if (app.isDark) {
+        Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.16f), Color.White.copy(alpha = 0.06f)))
+    } else {
+        CardRimBrush
     }
 
     val baseModifier = modifier
@@ -101,13 +112,13 @@ fun SpotyGlassCard(
         )
         .clip(shape)
         .then(
-            if (hazeState != null) {
+            if (useGlassBlur && hazeState != null) {
                 Modifier.hazeEffect(state = hazeState, style = style)
             } else {
-                Modifier.background(Color.White.copy(alpha = 0.76f))
+                Modifier.background(fallbackFill)
             }
         )
-        .border(width = 1.2.dp, brush = CardRimBrush, shape = shape)
+        .border(width = 1.2.dp, brush = rimBrush, shape = shape)
         .then(
             if (onClick != null) {
                 Modifier.clickable(
@@ -132,13 +143,22 @@ fun SpotyFloatingGlass(
     elevation: Dp = 16.dp,
     content: @Composable BoxScope.() -> Unit
 ) {
-    val style = remember(tintAlpha) {
+    val app = LocalSpotyAppearance.current
+    val useGlassBlur = hazeState != null && app.glassBlurEnabled && app.uiStyle == UiStyleMode.GLASS
+    val tintColor = if (app.isDark) Color(0xFF161923).copy(alpha = (tintAlpha + 0.20f).coerceAtMost(0.92f)) else Color.White.copy(alpha = tintAlpha)
+    val style = remember(tintAlpha, app.canvasBackground, app.isDark) {
         HazeStyle(
-            backgroundColor = SpotyColors.PureWhiteCanvas,
-            tints = listOf(HazeTint(color = Color.White.copy(alpha = tintAlpha))),
+            backgroundColor = app.canvasBackground,
+            tints = listOf(HazeTint(color = tintColor)),
             blurRadius = 24.dp,
             noiseFactor = 0.03f
         )
+    }
+    val fallbackFill = if (app.isDark) Color(0xFF161923).copy(alpha = 0.94f) else Color.White.copy(alpha = 0.90f)
+    val rimBrush = if (app.isDark) {
+        Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.22f), Color.White.copy(alpha = 0.08f)))
+    } else {
+        FloatingRimBrush
     }
 
     Box(
@@ -151,13 +171,13 @@ fun SpotyFloatingGlass(
             )
             .clip(shape)
             .then(
-                if (hazeState != null) {
+                if (useGlassBlur && hazeState != null) {
                     Modifier.hazeEffect(state = hazeState, style = style)
                 } else {
-                    Modifier.background(Color.White.copy(alpha = 0.82f))
+                    Modifier.background(fallbackFill)
                 }
             )
-            .border(width = 1.4.dp, brush = FloatingRimBrush, shape = shape),
+            .border(width = 1.4.dp, brush = rimBrush, shape = shape),
         content = content
     )
 }
@@ -170,14 +190,26 @@ fun SpotyGlassCircleButton(
     useFloatingLayer: Boolean = true,
     content: @Composable BoxScope.() -> Unit
 ) {
+    val app = LocalSpotyAppearance.current
     val hazeState = if (useFloatingLayer) LocalContentHazeState.current else LocalBgHazeState.current
-    val style = remember {
+    val useGlassBlur = hazeState != null && app.glassBlurEnabled && app.uiStyle == UiStyleMode.GLASS
+    val style = remember(app.canvasBackground, app.isDark) {
         HazeStyle(
-            backgroundColor = SpotyColors.PureWhiteCanvas,
-            tints = listOf(HazeTint(color = Color.White.copy(alpha = 0.60f))),
+            backgroundColor = app.canvasBackground,
+            tints = listOf(
+                HazeTint(
+                    color = if (app.isDark) Color(0xFF181C27).copy(alpha = 0.78f) else Color.White.copy(alpha = 0.60f)
+                )
+            ),
             blurRadius = 20.dp,
             noiseFactor = 0.02f
         )
+    }
+    val fallbackFill = if (app.isDark) Color(0xFF181C27).copy(alpha = 0.92f) else Color.White.copy(alpha = 0.88f)
+    val rimBrush = if (app.isDark) {
+        Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.22f), Color.White.copy(alpha = 0.08f)))
+    } else {
+        FloatingRimBrush
     }
 
     Box(
@@ -191,13 +223,13 @@ fun SpotyGlassCircleButton(
             )
             .clip(CircleShape)
             .then(
-                if (hazeState != null) {
+                if (useGlassBlur && hazeState != null) {
                     Modifier.hazeEffect(state = hazeState, style = style)
                 } else {
-                    Modifier.background(Color.White.copy(alpha = 0.80f))
+                    Modifier.background(fallbackFill)
                 }
             )
-            .border(width = 1.2.dp, brush = FloatingRimBrush, shape = CircleShape)
+            .border(width = 1.2.dp, brush = rimBrush, shape = CircleShape)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
         content = content

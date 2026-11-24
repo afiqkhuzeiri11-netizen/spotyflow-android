@@ -49,12 +49,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-apk
-          name: SpotyFlow Native v1.1.0
+          name: SpotyFlow Native v2.0.0
           body: |
-            SpotyFlow 100% Native Android (Stage 2) — Pure White x Full Liquid Glass 120 FPS + Real Water Drops Navbar + Fast On-Device Streaming.
-            - Media3 ExoPlayer 1.6.1 + 180MB Local Cache + Background MediaSession
-            - Direct InnerTube ANDROID_VR + NewPipeExtractor v0.26.0 fallback
-            - Full Artist Profile, Full Album/Playlist Detail, Full User Profile, Live Synced Lyrics & Audio/Video Mode
+            SpotyFlow 100% Native Android (Final v2.0.0-native, Build 4) — Pure White x Full Liquid Glass 120 FPS + Real Water Drops Navbar + 100% Auralys Features.
+            - Custom Dynamic Island Pro via AccessibilityService (6 Styles + Live Synced Lyrics + Camera-Cutout Calibration + Live Preview)
+            - Full 10-Category Settings, Hardware 5-Band Equalizer & Loudness FX, Skip Silence, Varispeed, Crossfade, Sleep Timer & Music Alarm
+            - Full Offline M4A Download Engine (Priority #0 0ms playback), Device MediaStore Audio Scanner, Spotify/YTM Playlist Importer & .json Backup
+            - Poster Lagu 3D Depth Effect Studio (100% Offline ML Kit Selfie Segmentation + 4-Layer Pixel-Aligned Depth Sandwich + Manual Refine Brush + Full HD PNG Gallery Save)
+            - 5 Dynamic Liquid Glass Home Screen Widgets (1x1, 2x2, 2x4, 4x1, 4x2) + Interactive Widget Settings Live Preview
           files: SpotyFlow.apk
           make_latest: true
         env:

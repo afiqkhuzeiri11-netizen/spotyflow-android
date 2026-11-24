@@ -1,0 +1,1083 @@
+package com.spotyflow.android.poster
+
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas as AndroidCanvas
+import android.graphics.Paint as AndroidPaint
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.ArrowBackIosNew
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Brush
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.GridOn
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Layers
+import androidx.compose.material.icons.rounded.MusicNote
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.Shuffle
+import androidx.compose.material.icons.rounded.Undo
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.spotyflow.android.data.PlayerUiState
+import com.spotyflow.android.data.TrackItem
+import com.spotyflow.android.data.remote.SpotyHttpClient
+import com.spotyflow.android.ui.glass.SpotyArtwork
+import com.spotyflow.android.ui.glass.SpotyGlassCard
+import com.spotyflow.android.ui.glass.SpotyGlassCircleButton
+import com.spotyflow.android.ui.theme.SpotyColors
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.Request
+import java.io.File
+import java.io.FileOutputStream
+import kotlin.math.hypot
+import kotlin.random.Random
+
+private enum class PosterTab(val label: String) {
+    PHOTO("Foto"),
+    CARDS("Kartu"),
+    CARD_STYLE("Gaya kartu"),
+    EFFECTS("Efek"),
+    STICKERS("Stiker")
+}
+
+private data class BrushStroke(
+    val points: List<Pair<Float, Float>>, // normalized 0..1 inside photo mask
+    val addForeground: Boolean,
+    val radiusFrac: Float
+)
+
+@Composable
+fun Poster3DStudioScreen(
+    uiState: PlayerUiState,
+    initialTrack: TrackItem? = null,
+    onBack: () -> Unit,
+    onShowToast: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    BackHandler(onBack = onBack)
+
+    // Initial track pool (1-5 songs selectable without interrupting audio!)
+    val initialTracks = remember(initialTrack?.id, uiState.currentTrack?.id) {
+        val base = listOfNotNull(initialTrack ?: uiState.currentTrack)
+        if (base.isNotEmpty()) base else uiState.homeTracks.take(1)
+    }
+
+    var selectedTracks by remember { mutableStateOf(initialTracks) }
+    var config by remember {
+        mutableStateOf(
+            PosterStudioConfig(
+                cards = Poster3DRenderer.defaultCardsForFormation(initialTracks, PosterFormation.MIRROR_SHOULDERS)
+            )
+        )
+    }
+
+    var activeTab by remember { mutableStateOf(PosterTab.PHOTO) }
+    var showSongPicker by remember { mutableStateOf(false) }
+    var showCutoutPreview by remember { mutableStateOf(false) }
+    var isBrushMode by remember { mutableStateOf(false) }
+    var brushAddForeground by remember { mutableStateOf(true) }
+    var brushStrokes by remember { mutableStateOf<List<BrushStroke>>(emptyList()) }
+    var currentStrokePoints by remember { mutableStateOf<List<Pair<Float, Float>>>(emptyList()) }
+    var isSegmenting by remember { mutableStateOf(false) }
+    var isExporting by remember { mutableStateOf(false) }
+
+    var uprightPhoto by remember { mutableStateOf<Bitmap?>(null) }
+    var depthResult by remember { mutableStateOf<DepthCutoutResult?>(null) }
+    var cutoutBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var coverBitmaps by remember { mutableStateOf<Map<String, Bitmap>>(emptyMap()) }
+    var customStickerFiles by remember { mutableStateOf<List<File>>(emptyList()) }
+    var customStickerBitmaps by remember { mutableStateOf<Map<String, Bitmap>>(emptyMap()) }
+    var previewBoxSize by remember { mutableStateOf(IntSize(540, 960)) }
+    var selectedStickerId by remember { mutableStateOf<String?>(null) }
+
+    val dominantAccentArgb = uiState.ambientPalette.accent.toArgb()
+
+    // Load custom stickers from filesDir/custom_stickers
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            val dir = File(context.filesDir, "custom_stickers").apply { mkdirs() }
+            val files = dir.listFiles()?.filter { it.isFile }?.sortedByDescending { it.lastModified() } ?: emptyList()
+            val bmps = mutableMapOf<String, Bitmap>()
+            files.forEach { f ->
+                BitmapFactory.decodeFile(f.absolutePath)?.let { bmps[f.absolutePath] = it }
+            }
+            customStickerFiles = files
+            customStickerBitmaps = bmps
+        }
+    }
+
+    // Download cover bitmaps for selectedTracks
+    LaunchedEffect(selectedTracks) {
+        withContext(Dispatchers.IO) {
+            val updated = coverBitmaps.toMutableMap()
+            selectedTracks.forEach { t ->
+                if (!updated.containsKey(t.id) && t.coverUrl.isNotBlank()) {
+                    try {
+                        val req = Request.Builder().url(t.coverUrl).get().build()
+                        SpotyHttpClient.client.newCall(req).execute().use { resp ->
+                            if (resp.isSuccessful) {
+                                val bytes = resp.body?.bytes()
+                                if (bytes != null) {
+                                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.let {
+                                        updated[t.id] = it
+                                    }
+                                }
+                            }
+                        }
+                    } catch (_: Throwable) {
+                        // Fallback handled by renderer
+                    }
+                }
+            }
+            coverBitmaps = updated
+        }
+    }
+
+    // Rebuild transparent cutout instantaneously when sensitivity / edgeFeather / manual brush changes
+    LaunchedEffect(uprightPhoto, depthResult, config.sensitivity, config.edgeFeather, brushStrokes) {
+        val photo = uprightPhoto ?: return@LaunchedEffect
+        val seg = depthResult ?: return@LaunchedEffect
+        if (seg.maskWidth <= 0 || seg.maskHeight <= 0) return@LaunchedEffect
+
+        val built = withContext(Dispatchers.Default) {
+            val brushBmp = if (brushStrokes.isNotEmpty()) {
+                val b = Bitmap.createBitmap(seg.maskWidth, seg.maskHeight, Bitmap.Config.ARGB_8888)
+                val c = AndroidCanvas(b)
+                brushStrokes.forEach { stroke ->
+                    val p = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+                        color = if (stroke.addForeground) android.graphics.Color.argb(255, 0, 255, 0) else android.graphics.Color.argb(255, 255, 0, 0)
+                        style = AndroidPaint.Style.STROKE
+                        strokeWidth = stroke.radiusFrac * seg.maskWidth
+                        strokeCap = AndroidPaint.Cap.ROUND
+                        strokeJoin = AndroidPaint.Join.ROUND
+                    }
+                    if (stroke.points.size == 1) {
+                        val pt = stroke.points.first()
+                        c.drawCircle(pt.first * seg.maskWidth, pt.second * seg.maskHeight, p.strokeWidth * 0.5f, AndroidPaint(p).apply { style = AndroidPaint.Style.FILL })
+                    } else {
+                        for (i in 1 until stroke.points.size) {
+                            val a = stroke.points[i - 1]
+                            val d = stroke.points[i]
+                            c.drawLine(a.first * seg.maskWidth, a.second * seg.maskHeight, d.first * seg.maskWidth, d.second * seg.maskHeight, p)
+                        }
+                    }
+                }
+                b
+            } else {
+                null
+            }
+            val result = SpotyFlowDepthEngine.buildTransparentObjectCutout(
+                uprightFullPhoto = photo,
+                rawConfidence = seg.rawConfidence,
+                maskW = seg.maskWidth,
+                maskH = seg.maskHeight,
+                sensitivity = config.sensitivity,
+                edgeFeather = config.edgeFeather,
+                manualBrushMask = brushBmp
+            )
+            brushBmp?.recycle()
+            result
+        }
+        cutoutBitmap = built
+    }
+
+    // Re-render live preview bitmap off main thread
+    LaunchedEffect(config, selectedTracks, coverBitmaps, uprightPhoto, cutoutBitmap, showCutoutPreview, isBrushMode, brushStrokes, customStickerBitmaps) {
+        val ratio = config.aspectRatio
+        val prevW = if (ratio.exportW >= ratio.exportH) 640 else 480
+        val prevH = ((prevW.toFloat() * ratio.exportH.toFloat()) / ratio.exportW.toFloat()).toInt().coerceAtLeast(240)
+
+        val rendered = withContext(Dispatchers.Default) {
+            if (showCutoutPreview && uprightPhoto != null) {
+                Poster3DRenderer.renderCheckerboardCutoutPreview(prevW, prevH, uprightPhoto!!, cutoutBitmap, config)
+            } else {
+                Poster3DRenderer.renderPoster(
+                    canvasW = prevW,
+                    canvasH = prevH,
+                    config = config,
+                    tracks = selectedTracks,
+                    coverBitmaps = coverBitmaps,
+                    customStickerBitmaps = customStickerBitmaps,
+                    uprightFullPhoto = uprightPhoto,
+                    cutoutBmp = cutoutBitmap,
+                    dominantAccentArgb = dominantAccentArgb
+                )
+            }
+        }
+        previewBitmap = rendered
+    }
+
+    // Pick Photo Launcher -> EXIF-upright decode + Offline ML Kit Selfie Segmentation
+    val photoPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            isSegmenting = true
+            brushStrokes = emptyList()
+            val photo = SpotyFlowDepthEngine.loadUprightPhoto(context, uri, maxSide = 1600)
+            if (photo != null) {
+                uprightPhoto = photo
+                val seg = SpotyFlowDepthEngine.segmentSubject(photo)
+                depthResult = seg
+                config = config.copy(depthEnabled = seg.hasSubject)
+                onShowToast(
+                    if (seg.hasSubject) "Objek dipotong otomatis & ditaruh di depan sampul"
+                    else "Foto dipasang (gunakan Kuas jika ingin memotong objek)"
+                )
+            } else {
+                onShowToast("Gagal memuat foto")
+            }
+            isSegmenting = false
+        }
+    }
+
+    // Upload Custom PNG Sticker Launcher
+    val stickerPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val savedFile = withContext(Dispatchers.IO) {
+                try {
+                    val dir = File(context.filesDir, "custom_stickers").apply { mkdirs() }
+                    val f = File(dir, "stk_${System.currentTimeMillis()}.png")
+                    context.contentResolver.openInputStream(uri)?.use { inp ->
+                        FileOutputStream(f).use { out -> inp.copyTo(out) }
+                    }
+                    f
+                } catch (_: Throwable) {
+                    null
+                }
+            }
+            if (savedFile != null) {
+                val bmp = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(savedFile.absolutePath) }
+                if (bmp != null) {
+                    customStickerFiles = listOf(savedFile) + customStickerFiles
+                    customStickerBitmaps = customStickerBitmaps + (savedFile.absolutePath to bmp)
+                    if (config.stickers.size < 30) {
+                        val st = PosterStickerItem(
+                            id = "stk_${System.currentTimeMillis()}",
+                            kind = null,
+                            customFilePath = savedFile.absolutePath,
+                            xFrac = 0.5f,
+                            yFrac = 0.25f
+                        )
+                        config = config.copy(stickers = config.stickers + st)
+                        selectedStickerId = st.id
+                    }
+                    onShowToast("Stiker kustom ditambahkan")
+                }
+            }
+        }
+    }
+
+    fun exportPoster(shareAfter: Boolean) {
+        if (isExporting) return
+        scope.launch {
+            isExporting = true
+            val savedUri = withContext(Dispatchers.IO) {
+                val bmp = Poster3DRenderer.renderPoster(
+                    canvasW = config.aspectRatio.exportW,
+                    canvasH = config.aspectRatio.exportH,
+                    config = config,
+                    tracks = selectedTracks,
+                    coverBitmaps = coverBitmaps,
+                    customStickerBitmaps = customStickerBitmaps,
+                    uprightFullPhoto = uprightPhoto,
+                    cutoutBmp = cutoutBitmap,
+                    dominantAccentArgb = dominantAccentArgb
+                )
+                val uri = savePosterPngToGallery(context, bmp)
+                bmp.recycle()
+                uri
+            }
+            isExporting = false
+            if (savedUri != null) {
+                if (shareAfter) {
+                    try {
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "image/png"
+                            putExtra(Intent.EXTRA_STREAM, savedUri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        context.startActivity(Intent.createChooser(shareIntent, "Bagikan Poster SpotyFlow"))
+                    } catch (_: Throwable) {
+                        onShowToast("Poster tersimpan di Galeri Pictures/SpotyFlow")
+                    }
+                } else {
+                    onShowToast("Poster Full HD disimpan ke Galeri Pictures/SpotyFlow")
+                }
+            } else {
+                onShowToast("Gagal menyimpan poster")
+            }
+        }
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(SpotyColors.PureWhiteCanvas)
+            .statusBarsPadding()
+            .navigationBarsPadding()
+    ) {
+        // =====================================================================
+        // HEADER BAR (< Poster lagu | Reset | Bagikan | Simpan)
+        // =====================================================================
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SpotyGlassCircleButton(onClick = onBack, size = 38.dp, useFloatingLayer = false) {
+                    Icon(Icons.Rounded.ArrowBackIosNew, contentDescription = "Kembali", tint = SpotyColors.Slate900, modifier = Modifier.size(16.dp))
+                }
+                Text("Poster lagu", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = SpotyColors.Slate900)
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                SpotyGlassCircleButton(
+                    onClick = {
+                        brushStrokes = emptyList()
+                        showCutoutPreview = false
+                        isBrushMode = false
+                        config = PosterStudioConfig(
+                            cards = Poster3DRenderer.defaultCardsForFormation(selectedTracks, PosterFormation.MIRROR_SHOULDERS)
+                        )
+                        onShowToast("Desain direset")
+                    },
+                    size = 36.dp,
+                    useFloatingLayer = false
+                ) {
+                    Icon(Icons.Rounded.Refresh, contentDescription = "Reset", tint = SpotyColors.Slate900, modifier = Modifier.size(17.dp))
+                }
+                SpotyGlassCircleButton(onClick = { exportPoster(shareAfter = true) }, size = 36.dp, useFloatingLayer = false) {
+                    Icon(Icons.Rounded.Share, contentDescription = "Bagikan", tint = SpotyColors.Slate900, modifier = Modifier.size(17.dp))
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(SpotyColors.Slate900)
+                        .clickable { exportPoster(shareAfter = false) }
+                        .padding(horizontal = 14.dp, vertical = 9.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        if (isExporting) {
+                            CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp, color = Color.White)
+                        } else {
+                            Icon(Icons.Rounded.Download, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
+                        }
+                        Text("Simpan", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // INTERACTIVE LIVE PREVIEW CANVAS (Drag Cards/Stickers OR Manual Refine Brush)
+        // =====================================================================
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            val ratioFloat = config.aspectRatio.exportW.toFloat() / config.aspectRatio.exportH.toFloat()
+            Box(
+                modifier = Modifier
+                    .aspectRatio(ratioFloat)
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(Color(0xFFE2E8F0))
+                    .border(1.5.dp, Color.White, RoundedCornerShape(22.dp))
+                    .onSizeChanged { previewBoxSize = it }
+                    .pointerInput(isBrushMode, brushAddForeground, config.cards, config.stickers) {
+                        var activeCardIdx = -1
+                        var activeStickerIdx = -1
+                        detectDragGestures(
+                            onDragStart = { startOffset ->
+                                val w = previewBoxSize.width.coerceAtLeast(1).toFloat()
+                                val h = previewBoxSize.height.coerceAtLeast(1).toFloat()
+                                val nx = (startOffset.x / w).coerceIn(0f, 1f)
+                                val ny = (startOffset.y / h).coerceIn(0f, 1f)
+
+                                if (isBrushMode) {
+                                    currentStrokePoints = listOf(nx to ny)
+                                } else {
+                                    // Check sticker hit first, then closest 3D music card
+                                    activeStickerIdx = config.stickers.indexOfLast { st ->
+                                        hypot(st.xFrac - nx, st.yFrac - ny) < 0.11f
+                                    }
+                                    if (activeStickerIdx >= 0) {
+                                        selectedStickerId = config.stickers[activeStickerIdx].id
+                                        activeCardIdx = -1
+                                    } else {
+                                        val cards = config.cards
+                                        activeCardIdx = cards.indices.minByOrNull { i ->
+                                            hypot(cards[i].centerXFrac - nx, cards[i].centerYFrac - ny)
+                                        } ?: -1
+                                    }
+                                }
+                            },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                val w = previewBoxSize.width.coerceAtLeast(1).toFloat()
+                                val h = previewBoxSize.height.coerceAtLeast(1).toFloat()
+                                if (isBrushMode) {
+                                    val nx = (change.position.x / w).coerceIn(0f, 1f)
+                                    val ny = (change.position.y / h).coerceIn(0f, 1f)
+                                    currentStrokePoints = currentStrokePoints + (nx to ny)
+                                } else if (activeStickerIdx >= 0 && activeStickerIdx < config.stickers.size) {
+                                    val dx = dragAmount.x / w
+                                    val dy = dragAmount.y / h
+                                    val updated = config.stickers.toMutableList()
+                                    val s = updated[activeStickerIdx]
+                                    updated[activeStickerIdx] = s.copy(
+                                        xFrac = (s.xFrac + dx).coerceIn(0.05f, 0.95f),
+                                        yFrac = (s.yFrac + dy).coerceIn(0.05f, 0.95f)
+                                    )
+                                    config = config.copy(stickers = updated)
+                                } else if (activeCardIdx >= 0 && activeCardIdx < config.cards.size) {
+                                    val dx = dragAmount.x / w
+                                    val dy = dragAmount.y / h
+                                    val updated = config.cards.toMutableList()
+                                    val c = updated[activeCardIdx]
+                                    updated[activeCardIdx] = c.copy(
+                                        centerXFrac = (c.centerXFrac + dx).coerceIn(0.08f, 0.92f),
+                                        centerYFrac = (c.centerYFrac + dy).coerceIn(0.10f, 0.90f)
+                                    )
+                                    config = config.copy(cards = updated)
+                                }
+                            },
+                            onDragEnd = {
+                                if (isBrushMode && currentStrokePoints.isNotEmpty()) {
+                                    brushStrokes = brushStrokes + BrushStroke(
+                                        points = currentStrokePoints,
+                                        addForeground = brushAddForeground,
+                                        radiusFrac = 0.065f
+                                    )
+                                    currentStrokePoints = emptyList()
+                                }
+                                activeCardIdx = -1
+                                activeStickerIdx = -1
+                            }
+                        )
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                previewBitmap?.let { bmp ->
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = "Preview Poster 3D",
+                        contentScale = ContentScale.FillBounds,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+
+                if (isSegmenting) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.35f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CircularProgressIndicator(color = Color.White, strokeWidth = 3.dp)
+                            Text("Memotong objek tanpa latar...", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        }
+                    }
+                }
+
+                // Brush Mode Floating Controls Banner
+                if (isBrushMode) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(8.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(SpotyColors.Slate900.copy(alpha = 0.88f))
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        BrushPill("+ Depan", brushAddForeground, Color(0xFF10B981)) { brushAddForeground = true }
+                        BrushPill("- Belakang", !brushAddForeground, Color(0xFFEF4444)) { brushAddForeground = false }
+                        Icon(
+                            imageVector = Icons.Rounded.Undo,
+                            contentDescription = "Undo",
+                            tint = Color.White,
+                            modifier = Modifier
+                                .size(22.dp)
+                                .clickable {
+                                    if (brushStrokes.isNotEmpty()) brushStrokes = brushStrokes.dropLast(1)
+                                }
+                        )
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(Color.White)
+                                .clickable { isBrushMode = false }
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text("Selesai", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = SpotyColors.Slate900)
+                        }
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // QUICK PILL ROW (Pilih Lagu 1-5 | 9:16 | 16:9 | 4:5 | 1:1 | Acak desain)
+        // =====================================================================
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            item {
+                QuickStudioPill(
+                    label = "Pilih Lagu (${selectedTracks.size}/5)",
+                    selected = true,
+                    onClick = { showSongPicker = true }
+                )
+            }
+            items(PosterAspectRatio.entries) { ratio ->
+                QuickStudioPill(
+                    label = ratio.label,
+                    selected = config.aspectRatio == ratio,
+                    onClick = { config = config.copy(aspectRatio = ratio) }
+                )
+            }
+            item {
+                QuickStudioPill(
+                    label = "Acak desain",
+                    selected = false,
+                    onClick = {
+                        val nextForm = PosterFormation.entries.random()
+                        val nextStyle = PosterCardStyle.entries.random()
+                        val nextBg = PosterBgPreset.entries.random()
+                        config = config.copy(
+                            formation = nextForm,
+                            cardStyle = nextStyle,
+                            bgPreset = nextBg,
+                            cards = Poster3DRenderer.defaultCardsForFormation(selectedTracks, nextForm),
+                            lensFlarePct = Random.nextFloat().coerceIn(0.3f, 0.95f)
+                        )
+                    }
+                )
+            }
+        }
+
+        // =====================================================================
+        // BOTTOM 5-TAB CONTROL PANEL (Foto | Kartu | Gaya kartu | Efek | Stiker)
+        // =====================================================================
+        SpotyGlassCard(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(258.dp)
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            shape = RoundedCornerShape(24.dp),
+            tintAlpha = 0.88f,
+            elevation = 14.dp
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                // 5 Tab Strip
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    PosterTab.entries.forEach { tab ->
+                        val sel = activeTab == tab
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(if (sel) SpotyColors.Slate900 else Color.Transparent)
+                                .clickable { activeTab = tab }
+                                .padding(horizontal = 11.dp, vertical = 7.dp)
+                        ) {
+                            Text(
+                                text = tab.label,
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (sel) Color.White else SpotyColors.Slate500
+                            )
+                        }
+                    }
+                }
+
+                // Active Tab Controls
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 14.dp, vertical = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    when (activeTab) {
+                        PosterTab.PHOTO -> {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                ActionStudioChip(
+                                    label = if (uprightPhoto == null) "Pilih foto sendiri" else "Ganti foto",
+                                    highlighted = true,
+                                    onClick = {
+                                        photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (uprightPhoto != null) {
+                                    ActionStudioChip(
+                                        label = if (showCutoutPreview) "Mode Poster" else "Lihat Potongan",
+                                        highlighted = showCutoutPreview,
+                                        onClick = { showCutoutPreview = !showCutoutPreview },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    ActionStudioChip(
+                                        label = if (isBrushMode) "Kuas Aktif" else "Rapikan Kuas",
+                                        highlighted = isBrushMode,
+                                        onClick = {
+                                            showCutoutPreview = false
+                                            isBrushMode = !isBrushMode
+                                            if (isBrushMode) onShowToast("Usap jari di preview untuk rapikan objek")
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                            }
+
+                            PosterSwitchRow(
+                                label = "Objek di Depan Sampul (Potong Latar Otomatis)",
+                                checked = config.depthEnabled,
+                                onChecked = { config = config.copy(depthEnabled = it) }
+                            )
+                            PosterSliderRow("Sensitivitas Potongan", config.sensitivity, 0.2f..0.8f) { config = config.copy(sensitivity = it) }
+                            PosterSliderRow("Halus Tepi", config.edgeFeather, 0f..1f) { config = config.copy(edgeFeather = it) }
+                            PosterSliderRow("Gelap Latar", config.bgDimPct, 0f..0.85f) { config = config.copy(bgDimPct = it) }
+                            PosterSliderRow("Kabur Latar", config.bgBlurPct, 0f..1f) { config = config.copy(bgBlurPct = it) }
+                            PosterSliderRow("Cahaya Kartu", config.cardGlowPct, 0f..1f) { config = config.copy(cardGlowPct = it) }
+                            PosterSliderRow("Zoom Foto", config.photoZoom, 1.0f..2.2f) { config = config.copy(photoZoom = it) }
+                            PosterSliderRow("Geser Foto X", config.photoPanX, -1f..1f) { config = config.copy(photoPanX = it) }
+                            PosterSliderRow("Geser Foto Y", config.photoPanY, -1f..1f) { config = config.copy(photoPanY = it) }
+                        }
+
+                        PosterTab.CARDS -> {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(PosterFormation.entries) { form ->
+                                    QuickStudioPill(
+                                        label = form.label,
+                                        selected = config.formation == form,
+                                        onClick = {
+                                            config = config.copy(
+                                                formation = form,
+                                                cards = Poster3DRenderer.defaultCardsForFormation(selectedTracks, form)
+                                            )
+                                        }
+                                    )
+                                }
+                            }
+                            PosterSliderRow("Putar 3D Y", config.globalRotateY, -40f..40f) { config = config.copy(globalRotateY = it) }
+                            PosterSliderRow("Dongak 3D X", config.globalRotateX, -30f..30f) { config = config.copy(globalRotateX = it) }
+                            PosterSliderRow("Miring Z", config.globalRotateZ, -35f..35f) { config = config.copy(globalRotateZ = it) }
+                            PosterSliderRow("Ukuran Kartu", config.globalCardScale, 0.65f..1.4f) { config = config.copy(globalCardScale = it) }
+                            PosterSwitchRow("Tampilkan sampul", config.showCover) { config = config.copy(showCover = it) }
+                            PosterSwitchRow("Tampilkan judul & artis", config.showTitleArtist) { config = config.copy(showTitleArtist = it) }
+                            PosterSwitchRow("Tampilkan seekbar", config.showSeekbar) { config = config.copy(showSeekbar = it) }
+                            PosterSwitchRow("Tampilkan tombol kontrol", config.showControls) { config = config.copy(showControls = it) }
+                        }
+
+                        PosterTab.CARD_STYLE -> {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(PosterCardStyle.entries) { style ->
+                                    QuickStudioPill(
+                                        label = style.label,
+                                        selected = config.cardStyle == style,
+                                        onClick = { config = config.copy(cardStyle = style) }
+                                    )
+                                }
+                            }
+                            PosterSliderRow("Ketebalan 3D", config.thickness3dPct, 0f..1f) { config = config.copy(thickness3dPct = it) }
+                            PosterSliderRow("Transparansi Kartu", config.cardAlpha, 0.45f..1f) { config = config.copy(cardAlpha = it) }
+                            PosterSliderRow("Kebulatan Sudut", config.cardCornerPct, 0f..1f) { config = config.copy(cardCornerPct = it) }
+                        }
+
+                        PosterTab.EFFECTS -> {
+                            PosterSliderRow("Kilau Sudut", config.lensFlarePct, 0f..1f) { config = config.copy(lensFlarePct = it) }
+                            PosterSliderRow("Bayangan 3D", config.shadow3dPct, 0f..1f) { config = config.copy(shadow3dPct = it) }
+                            PosterSliderRow("Vignette", config.vignettePct, 0f..1f) { config = config.copy(vignettePct = it) }
+                            PosterSliderRow("Film Grain", config.filmGrainPct, 0f..0.8f) { config = config.copy(filmGrainPct = it) }
+                            Text("Latar Studio (Tanpa Foto)", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = SpotyColors.Slate900)
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(PosterBgPreset.entries) { bg ->
+                                    QuickStudioPill(
+                                        label = bg.label,
+                                        selected = config.bgPreset == bg,
+                                        onClick = { config = config.copy(bgPreset = bg) }
+                                    )
+                                }
+                            }
+                        }
+
+                        PosterTab.STICKERS -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "${config.stickers.size} dari 30 stiker",
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = SpotyColors.Slate500
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    if (config.stickers.isNotEmpty()) {
+                                        QuickStudioPill("Hapus terakhir", false) {
+                                            config = config.copy(stickers = config.stickers.dropLast(1))
+                                        }
+                                    }
+                                    QuickStudioPill("+ Tambah stiker PNG", true) {
+                                        stickerPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                    }
+                                }
+                            }
+
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(BuiltInStickerKind.entries) { kind ->
+                                    QuickStudioPill(kind.label, false) {
+                                        if (config.stickers.size < 30) {
+                                            val st = PosterStickerItem(
+                                                id = "st_${System.currentTimeMillis()}_${kind.name}",
+                                                kind = kind,
+                                                xFrac = 0.25f + Random.nextFloat() * 0.5f,
+                                                yFrac = 0.16f + Random.nextFloat() * 0.35f
+                                            )
+                                            config = config.copy(stickers = config.stickers + st)
+                                            selectedStickerId = st.id
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (customStickerFiles.isNotEmpty()) {
+                                Text("Stiker saya", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = SpotyColors.Slate900)
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    items(customStickerFiles, key = { it.absolutePath }) { f ->
+                                        val bmp = customStickerBitmaps[f.absolutePath]
+                                        Box(
+                                            modifier = Modifier
+                                                .size(52.dp)
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(SpotyColors.Slate900.copy(alpha = 0.08f))
+                                                .clickable {
+                                                    if (config.stickers.size < 30) {
+                                                        val st = PosterStickerItem(
+                                                            id = "cst_${System.currentTimeMillis()}",
+                                                            kind = null,
+                                                            customFilePath = f.absolutePath
+                                                        )
+                                                        config = config.copy(stickers = config.stickers + st)
+                                                        selectedStickerId = st.id
+                                                    }
+                                                },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            if (bmp != null) {
+                                                Image(
+                                                    bitmap = bmp.asImageBitmap(),
+                                                    contentDescription = "Stiker kustom",
+                                                    modifier = Modifier.fillMaxSize().padding(4.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            val activeSt = config.stickers.firstOrNull { it.id == selectedStickerId } ?: config.stickers.lastOrNull()
+                            if (activeSt != null) {
+                                PosterSwitchRow("Taruh stiker di belakang objek", activeSt.behindSubject) { behind ->
+                                    config = config.copy(
+                                        stickers = config.stickers.map { if (it.id == activeSt.id) it.copy(behindSubject = behind) else it }
+                                    )
+                                }
+                                PosterSliderRow("Ukuran stiker", activeSt.scale, 0.5f..2.2f) { sc ->
+                                    config = config.copy(
+                                        stickers = config.stickers.map { if (it.id == activeSt.id) it.copy(scale = sc) else it }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+            }
+        }
+    }
+
+    // Multi-Track Song Picker (1-5 Songs without interrupting active playback!)
+    if (showSongPicker) {
+        val pool = remember(uiState.currentTrack, uiState.likedTracks, uiState.recentTracks, uiState.homeTracks) {
+            val map = LinkedHashMap<String, TrackItem>()
+            (listOfNotNull(uiState.currentTrack) + uiState.likedTracks + uiState.recentTracks + uiState.homeTracks).forEach {
+                if (!map.containsKey(it.id)) map[it.id] = it
+            }
+            map.values.toList()
+        }
+        AlertDialog(
+            onDismissRequest = { showSongPicker = false },
+            containerColor = Color.White,
+            title = { Text("Pilih 1-5 Lagu untuk Poster", fontWeight = FontWeight.ExtraBold, color = SpotyColors.Slate900) },
+            text = {
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 360.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(pool, key = { it.id }) { t ->
+                        val picked = selectedTracks.any { it.id == t.id }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (picked) SpotyColors.EmeraldTint else SpotyColors.Slate900.copy(alpha = 0.04f))
+                                .clickable {
+                                    val next = if (picked) {
+                                        if (selectedTracks.size > 1) selectedTracks.filterNot { it.id == t.id } else selectedTracks
+                                    } else {
+                                        if (selectedTracks.size < 5) selectedTracks + t else selectedTracks
+                                    }
+                                    selectedTracks = next
+                                    config = config.copy(
+                                        cards = Poster3DRenderer.defaultCardsForFormation(next, config.formation)
+                                    )
+                                }
+                                .padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            SpotyArtwork(t.coverUrl, t.accentColor, 40.dp, 10.dp)
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(t.title, fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = SpotyColors.Slate900, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(t.artist, fontSize = 11.5.sp, color = SpotyColors.Slate500, maxLines = 1)
+                            }
+                            if (picked) {
+                                Icon(Icons.Rounded.Check, contentDescription = null, tint = SpotyColors.DeepEmerald, modifier = Modifier.size(20.dp))
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showSongPicker = false }) {
+                    Text("Selesai (${selectedTracks.size})", fontWeight = FontWeight.Bold, color = SpotyColors.DeepEmerald)
+                }
+            }
+        )
+    }
+}
+
+private fun savePosterPngToGallery(context: Context, bmp: Bitmap): Uri? {
+    return try {
+        val fileName = "SpotyFlow_Poster_${System.currentTimeMillis()}.png"
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/SpotyFlow")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+        }
+        val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+        context.contentResolver.openOutputStream(uri)?.use { out ->
+            bmp.compress(Bitmap.CompressFormat.PNG, 100, out)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val done = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+            context.contentResolver.update(uri, done, null, null)
+        }
+        uri
+    } catch (_: Throwable) {
+        null
+    }
+}
+
+@Composable
+private fun BrushPill(label: String, active: Boolean, activeColor: Color, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(if (active) activeColor else Color.White.copy(alpha = 0.14f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+    ) {
+        Text(label, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+    }
+}
+
+@Composable
+private fun QuickStudioPill(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(if (selected) SpotyColors.EmeraldCrystal else SpotyColors.Slate900.copy(alpha = 0.07f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 7.dp)
+    ) {
+        Text(
+            text = label,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            color = if (selected) Color.White else SpotyColors.Slate900
+        )
+    }
+}
+
+@Composable
+private fun ActionStudioChip(
+    label: String,
+    highlighted: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (highlighted) SpotyColors.EmeraldCrystal else SpotyColors.Slate900.copy(alpha = 0.07f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 9.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            fontSize = 11.5.sp,
+            fontWeight = FontWeight.Bold,
+            color = if (highlighted) Color.White else SpotyColors.Slate900,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun PosterSliderRow(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onChange: (Float) -> Unit
+) {
+    Column {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(label, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = SpotyColors.Slate900)
+            Text(String.format(java.util.Locale.US, "%.2f", value), fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = SpotyColors.DeepEmerald)
+        }
+        Slider(
+            value = value.coerceIn(range.start, range.endInclusive),
+            onValueChange = onChange,
+            valueRange = range,
+            colors = SliderDefaults.colors(thumbColor = SpotyColors.EmeraldCrystal, activeTrackColor = SpotyColors.EmeraldCrystal)
+        )
+    }
+}
+
+@Composable
+private fun PosterSwitchRow(label: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onChecked(!checked) }
+            .padding(vertical = 2.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = SpotyColors.Slate900, modifier = Modifier.weight(1f))
+        Switch(
+            checked = checked,
+            onCheckedChange = onChecked,
+            colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = SpotyColors.EmeraldCrystal)
+        )
+    }
+}

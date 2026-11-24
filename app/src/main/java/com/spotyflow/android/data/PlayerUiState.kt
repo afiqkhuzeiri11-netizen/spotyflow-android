@@ -2,17 +2,27 @@ package com.spotyflow.android.data
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.media.AudioManager
 import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.spotyflow.android.data.local.AppSettings
+import com.spotyflow.android.data.local.AppSettingsStore
 import com.spotyflow.android.data.local.CoverPaletteExtractor
+import com.spotyflow.android.data.local.DeviceAudioScanner
 import com.spotyflow.android.data.local.LocalLibraryStore
+import com.spotyflow.android.data.local.OfflineDownloadManager
 import com.spotyflow.android.data.remote.InnerTubeMusicClient
+import com.spotyflow.android.data.remote.LyricsEnhancer
 import com.spotyflow.android.data.remote.LyricsRepository
 import com.spotyflow.android.data.remote.LyricsResult
+import com.spotyflow.android.data.remote.PlaylistImporter
+import com.spotyflow.android.player.DynamicIslandCommand
 import com.spotyflow.android.player.DynamicIslandStateBus
 import com.spotyflow.android.player.SpotyFlowPlaybackService
+import com.spotyflow.android.widget.SpotyFlowBaseWidgetProvider
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,9 +46,13 @@ data class PlayerUiState(
     val isShuffle: Boolean = false,
     val repeatMode: RepeatMode = RepeatMode.Off,
     val playerMode: PlayerMode = PlayerMode.Audio,
+    val sleepTimerRemainingSec: Int = 0,
+    val sleepStopAtEndOfTrack: Boolean = false,
     val volume: Float = 0.8f,
     val ambientPalette: AmbientPalette = AmbientPalette(),
     val lyricsResult: LyricsResult = LyricsResult(),
+    val translatedLyrics: List<String> = emptyList(),
+    val romanizedLyrics: List<String> = emptyList(),
     val isLyricsLoading: Boolean = false,
     val isNowPlayingOpen: Boolean = false,
     val isLyricsVisible: Boolean = false,
@@ -51,11 +65,16 @@ data class PlayerUiState(
     val searchHistory: List<String> = emptyList(),
     val userProfile: UserProfile = UserProfile(),
     val likedTracks: List<TrackItem> = emptyList(),
+    val downloadedTracks: List<TrackItem> = emptyList(),
+    val downloadProgress: Map<String, Int> = emptyMap(),
+    val deviceTracks: List<TrackItem> = emptyList(),
+    val uploadedTracks: List<TrackItem> = emptyList(),
     val followedArtists: List<ArtistSummary> = emptyList(),
     val savedCollections: List<CollectionSummary> = emptyList(),
     val customPlaylists: List<CustomPlaylist> = emptyList(),
     val recentTracks: List<TrackItem> = emptyList(),
     val dailyStreak: DailyStreak = DailyStreak(),
+    val appSettings: AppSettings = AppSettings(),
     val waterDropsEnabled: Boolean = true,
     val detailStack: List<DetailDestination> = emptyList(),
     val loadedArtistProfile: ArtistProfileData? = null,
@@ -79,9 +98,10 @@ data class PlayerUiState(
         get() {
             val lines = lyricsResult.activeList
             if (lines.isEmpty() || !lyricsResult.isSynced) return 0
+            val adjustedPos = positionMs + appSettings.lyricsOffsetMs
             var idx = 0
             for (i in lines.indices) {
-                if (positionMs >= lines[i].timeMs) idx = i
+                if (adjustedPos >= lines[i].timeMs) idx = i
             }
             return idx
         }
@@ -100,31 +120,40 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
 
     private var searchJob: Job? = null
     private var lyricsJob: Job? = null
+    private var translateJob: Job? = null
     private var paletteJob: Job? = null
     private var detailJob: Job? = null
     private var lastLoadedTrackId: String = ""
 
     init {
+        AppSettingsStore.load(appContext)
+        OfflineDownloadManager.init(appContext)
+        observeAppSettings()
+        observeOfflineDownloads()
         observePlaybackService()
+        observeIslandLikeCommand()
         loadHomeMood("Semua")
+        scanDeviceMusicAsync()
     }
 
     private fun loadInitialState(): PlayerUiState {
         val recent = store.getRecentTracks()
         val liked = store.getLikedTracks()
-        val currentVol = readSystemVolumeFraction()
+        val settings = AppSettingsStore.load(appContext)
         return PlayerUiState(
             currentTrack = recent.firstOrNull() ?: liked.firstOrNull(),
-            volume = currentVol,
+            volume = readSystemVolumeFraction(),
             searchHistory = store.getSearchHistory(),
             userProfile = store.getUserProfile(),
             likedTracks = liked,
+            uploadedTracks = store.getUploadedTracks(),
             followedArtists = store.getFollowedArtists(),
             savedCollections = store.getSavedCollections(),
             customPlaylists = store.getCustomPlaylists(),
             recentTracks = recent,
             dailyStreak = store.getDailyStreak(),
-            waterDropsEnabled = store.isWaterDropsEnabled()
+            appSettings = settings,
+            waterDropsEnabled = settings.waterDropsEnabled
         )
     }
 
@@ -135,6 +164,42 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
             if (max > 0) (cur.toFloat() / max.toFloat()).coerceIn(0f, 1f) else 0.8f
         } catch (_: Throwable) {
             0.8f
+        }
+    }
+
+    private fun observeAppSettings() {
+        viewModelScope.launch {
+            AppSettingsStore.settings.collect { s ->
+                val prevTranslate = _uiState.value.appSettings.lyricsAutoTranslate
+                val prevRomanize = _uiState.value.appSettings.lyricsAutoRomanize
+                _uiState.update { it.copy(appSettings = s, waterDropsEnabled = s.waterDropsEnabled) }
+                if (s.lyricsAutoTranslate != prevTranslate || s.lyricsAutoRomanize != prevRomanize) {
+                    refreshLyricEnhancements(_uiState.value.lyricsResult)
+                }
+            }
+        }
+    }
+
+    private fun observeOfflineDownloads() {
+        viewModelScope.launch {
+            OfflineDownloadManager.downloadedTracks.collect { list ->
+                _uiState.update { it.copy(downloadedTracks = list) }
+            }
+        }
+        viewModelScope.launch {
+            OfflineDownloadManager.progressMap.collect { prog ->
+                _uiState.update { it.copy(downloadProgress = prog) }
+            }
+        }
+    }
+
+    private fun observeIslandLikeCommand() {
+        viewModelScope.launch {
+            DynamicIslandStateBus.commands.collect { cmd ->
+                if (cmd == DynamicIslandCommand.ToggleLike) {
+                    _uiState.update { it.copy(likedTracks = store.getLikedTracks()) }
+                }
+            }
         }
     }
 
@@ -153,14 +218,15 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
                         durationMs = svc.durationMs.takeIf { it > 0L } ?: ((activeTrack?.durationSec ?: 0) * 1000L),
                         isShuffle = svc.isShuffle,
                         repeatMode = svc.repeatMode,
-                        playerMode = svc.playerMode
+                        playerMode = svc.playerMode,
+                        sleepTimerRemainingSec = svc.sleepTimerRemainingSec,
+                        sleepStopAtEndOfTrack = svc.sleepStopAtEndOfTrack
                     )
                 }
 
-                // Sync active synced lyric line to DynamicIslandStateBus
                 val curUi = _uiState.value
                 val lines = curUi.lyricsResult.activeList
-                val activeLine = if (curUi.lyricsResult.isSynced && lines.isNotEmpty()) {
+                val activeLine = if (curUi.appSettings.lyricsSyncIsland && curUi.lyricsResult.isSynced && lines.isNotEmpty()) {
                     lines.getOrNull(curUi.activeLyricIndex)?.text.orEmpty()
                 } else {
                     ""
@@ -173,7 +239,6 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
 
-                // Trigger palette + lyrics fetch whenever track changes
                 if (activeTrack != null && activeTrack.id != lastLoadedTrackId) {
                     lastLoadedTrackId = activeTrack.id
                     onActiveTrackChanged(activeTrack)
@@ -183,25 +248,59 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun onActiveTrackChanged(track: TrackItem) {
-        // Record history & daily streak
-        val (recent, streak) = store.recordTrackPlay(track, 1)
-        _uiState.update { it.copy(recentTracks = recent, dailyStreak = streak) }
+        val s = _uiState.value.appSettings
+        if (!s.pauseListenHistory && !s.incognitoSession) {
+            val (recent, streak) = store.recordTrackPlay(track, 1)
+            _uiState.update { it.copy(recentTracks = recent, dailyStreak = streak) }
+        }
 
-        // Extract adaptive pastel cover palette in background
         paletteJob?.cancel()
         paletteJob = viewModelScope.launch {
             val pal = CoverPaletteExtractor.extract(appContext, track.coverUrl, track.accentColor)
             _uiState.update { it.copy(ambientPalette = pal) }
             DynamicIslandStateBus.update { it.copy(accentColor = pal.accent) }
+            SpotyFlowBaseWidgetProvider.updateAllWidgetsAsync(appContext)
         }
 
-        // Fetch real-time synced lyrics in background
         lyricsJob?.cancel()
-        _uiState.update { it.copy(isLyricsLoading = true, lyricsResult = LyricsResult()) }
+        _uiState.update {
+            it.copy(
+                isLyricsLoading = true,
+                lyricsResult = LyricsResult(),
+                translatedLyrics = emptyList(),
+                romanizedLyrics = emptyList()
+            )
+        }
         lyricsJob = viewModelScope.launch {
             val res = LyricsRepository.fetchLyrics(track)
             if (_uiState.value.currentTrack?.id == track.id) {
                 _uiState.update { it.copy(isLyricsLoading = false, lyricsResult = res) }
+                refreshLyricEnhancements(res)
+            }
+        }
+    }
+
+    private fun refreshLyricEnhancements(res: LyricsResult) {
+        translateJob?.cancel()
+        val lines = res.activeList
+        val s = _uiState.value.appSettings
+        if (lines.isEmpty()) {
+            _uiState.update { it.copy(translatedLyrics = emptyList(), romanizedLyrics = emptyList()) }
+            return
+        }
+        translateJob = viewModelScope.launch {
+            val rom = if (s.lyricsAutoRomanize && LyricsEnhancer.needsRomanization(lines)) {
+                lines.map { LyricsEnhancer.romanizeText(it.text) }
+            } else {
+                emptyList()
+            }
+            _uiState.update { it.copy(romanizedLyrics = rom) }
+
+            if (s.lyricsAutoTranslate) {
+                val tr = LyricsEnhancer.translateLines(lines, s.lyricsTranslateTarget)
+                _uiState.update { it.copy(translatedLyrics = tr) }
+            } else {
+                _uiState.update { it.copy(translatedLyrics = emptyList()) }
             }
         }
     }
@@ -233,8 +332,15 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun scanDeviceMusicAsync() {
+        viewModelScope.launch {
+            val found = DeviceAudioScanner.scanDeviceAudio(appContext)
+            _uiState.update { it.copy(deviceTracks = found) }
+        }
+    }
+
     // =========================================================================
-    // REAL MEDIA3 PLAYBACK CONTROLS (OPTIMISTIC 0ms UI)
+    // REAL MEDIA3 PLAYBACK CONTROLS
     // =========================================================================
     fun playTrack(track: TrackItem, queue: List<TrackItem> = emptyList()) {
         val list = if (queue.isNotEmpty()) queue else {
@@ -242,7 +348,6 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
             if (pool.any { it.id == track.id }) pool else listOf(track) + pool.take(15)
         }
         val startIdx = list.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
-        // Optimistic 0ms UI update
         _uiState.update {
             it.copy(
                 currentTrack = track,
@@ -313,15 +418,23 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
         SpotyFlowPlaybackService.dispatch(appContext) { it.setPlayerMode(mode) }
     }
 
+    fun startSleepTimer(minutes: Int, stopAtTrackEnd: Boolean = false) {
+        SpotyFlowPlaybackService.dispatch(appContext) { it.startSleepTimer(minutes, stopAtTrackEnd) }
+        val msg = when {
+            stopAtTrackEnd -> "Musik akan berhenti di akhir lagu ini"
+            minutes > 0 -> "Timer tidur aktif ($minutes menit)"
+            else -> "Timer tidur dimatikan"
+        }
+        showToast(msg)
+    }
+
     fun setVolume(fraction: Float) {
         val clamped = fraction.coerceIn(0f, 1f)
         _uiState.update { it.copy(volume = clamped) }
         try {
             val max = audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 15
             audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, (clamped * max).toInt(), 0)
-        } catch (_: Throwable) {
-            // Ignore audio manager restrictions
-        }
+        } catch (_: Throwable) {}
     }
 
     fun addTrackNext(track: TrackItem) {
@@ -344,7 +457,91 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // =========================================================================
-    // LIVE SEARCH (MULTI-TYPE: Songs, Videos, Artists, Albums, Playlists)
+    // OFFLINE DOWNLOADS, UPLOAD LOCAL AUDIO & SPOTIFY/YTM PLAYLIST IMPORT
+    // =========================================================================
+    fun downloadTrackOffline(track: TrackItem) {
+        if (track.videoId.length != 11) {
+            showToast("Lagu ini sudah tersimpan lokal")
+            return
+        }
+        if (OfflineDownloadManager.isDownloaded(appContext, track.videoId)) {
+            showToast("Sudah diunduh untuk offline")
+            return
+        }
+        showToast("Mengunduh ${track.title}...")
+        OfflineDownloadManager.downloadTrack(appContext, track) { ok ->
+            showToast(if (ok) "Berhasil diunduh ke Offline" else "Gagal mengunduh lagu")
+        }
+    }
+
+    fun downloadTracksBatch(tracks: List<TrackItem>) {
+        if (tracks.isEmpty()) return
+        showToast("Mengunduh ${tracks.size} lagu untuk offline...")
+        OfflineDownloadManager.downloadBatch(appContext, tracks) { count ->
+            showToast("$count lagu berhasil diunduh")
+        }
+    }
+
+    fun deleteOfflineTrack(videoId: String) {
+        OfflineDownloadManager.deleteTrack(appContext, videoId)
+        showToast("Dihapus dari unduhan offline")
+    }
+
+    fun importPlaylistFromUrl(url: String) {
+        showToast("Mengimpor playlist...")
+        viewModelScope.launch {
+            val imported = PlaylistImporter.importFromUrl(url)
+            if (imported != null && imported.tracks.isNotEmpty()) {
+                val updated = store.createPlaylist("${imported.title} (${imported.source})", imported.tracks)
+                _uiState.update { it.copy(customPlaylists = updated) }
+                showToast("Berhasil mengimpor ${imported.tracks.size} lagu dari ${imported.source}")
+            } else {
+                showToast("Tautan playlist tidak dapat dibaca")
+            }
+        }
+    }
+
+    fun addUploadedAudioUris(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            val added = mutableListOf<TrackItem>()
+            uris.forEach { uri ->
+                try {
+                    appContext.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (_: Throwable) {}
+                val title = queryDisplayName(uri).substringBeforeLast(".").ifBlank { "Audio Unggahan" }
+                added.add(
+                    TrackItem(
+                        id = "up_${uri.toString().hashCode()}",
+                        videoId = "",
+                        title = title,
+                        artist = "Koleksi Diunggah",
+                        localUri = uri.toString(),
+                        accentColor = deterministicAccent(title)
+                    )
+                )
+            }
+            val updated = store.addUploadedTracks(added)
+            _uiState.update { it.copy(uploadedTracks = updated) }
+            showToast("${added.size} file audio ditambahkan ke Diunggah")
+        }
+    }
+
+    private fun queryDisplayName(uri: Uri): String {
+        return try {
+            appContext.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0).orEmpty() else ""
+            }.orEmpty()
+        } catch (_: Throwable) {
+            ""
+        }
+    }
+
+    // =========================================================================
+    // LIVE SEARCH
     // =========================================================================
     fun updateSearchQuery(query: String) {
         _uiState.update { it.copy(searchQuery = query) }
@@ -382,7 +579,8 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun executeSearch(query: String, filter: SearchFilter, saveHistory: Boolean) {
         _uiState.update { it.copy(isSearching = true) }
-        if (saveHistory) {
+        val s = _uiState.value.appSettings
+        if (saveHistory && !s.pauseSearchHistory && !s.incognitoSession) {
             val nextHist = store.addSearchHistory(query)
             _uiState.update { it.copy(searchHistory = nextHist) }
         }
@@ -396,9 +594,37 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(searchHistory = store.removeSearchHistory(item)) }
     }
 
+    fun clearAllHistory() {
+        store.clearRecentHistory()
+        store.clearSearchHistory()
+        _uiState.update { it.copy(recentTracks = emptyList(), searchHistory = emptyList()) }
+        showToast("Riwayat putar & pencarian dihapus")
+    }
+
     // =========================================================================
-    // FULL PROFILES: ARTIST PROFILE, ALBUM/PLAYLIST DETAIL & USER PROFILE
+    // NAVIGATION TO ALL FULL-SCREEN STAGE 2 / 3 / 4 DESTINATIONS
     // =========================================================================
+    fun openSettings() = pushDetail(DetailDestination.Settings)
+    fun openDynamicIslandSettings() = pushDetail(DetailDestination.DynamicIsland)
+    fun openWidgetSettings() = pushDetail(DetailDestination.WidgetSettings)
+    fun openEqualizer() = pushDetail(DetailDestination.Equalizer)
+    fun openSongRecognize() = pushDetail(DetailDestination.SongRecognize)
+    fun openListenTogether() = pushDetail(DetailDestination.ListenTogether)
+    fun openStatsRecap() = pushDetail(DetailDestination.StatsRecap)
+    fun openPoster3D(track: TrackItem? = _uiState.value.currentTrack) = pushDetail(DetailDestination.Poster3D(track))
+
+    fun getTop50Tracks(): List<TrackItem> = store.getTop50Tracks()
+
+    private fun pushDetail(dest: DetailDestination) {
+        _uiState.update {
+            it.copy(
+                isNowPlayingOpen = false,
+                menuTrack = null,
+                detailStack = it.detailStack + dest
+            )
+        }
+    }
+
     fun openArtistProfile(browseId: String, artistName: String) {
         val dest = DetailDestination.Artist(browseId, artistName)
         _uiState.update {
@@ -441,11 +667,7 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openCustomPlaylist(playlist: CustomPlaylist) {
-        val dest = DetailDestination.Collection(
-            browseId = playlist.id,
-            fallbackTitle = playlist.title,
-            isCustom = true
-        )
+        val dest = DetailDestination.Collection(browseId = playlist.id, fallbackTitle = playlist.title, isCustom = true)
         _uiState.update {
             it.copy(
                 detailStack = it.detailStack + dest,
@@ -470,7 +692,11 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
         if (stack.isEmpty()) return false
         val nextStack = stack.dropLast(1)
         _uiState.update { it.copy(detailStack = nextStack) }
-        nextStack.lastOrNull()?.let { loadDetailDestination(it) }
+        nextStack.lastOrNull()?.let {
+            if (it is DetailDestination.Artist || it is DetailDestination.Collection) {
+                loadDetailDestination(it)
+            }
+        }
         return true
     }
 
@@ -487,6 +713,13 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
                     if (dest.localKey != null) {
                         val tracks = when (dest.localKey) {
                             "liked" -> _uiState.value.likedTracks
+                            "downloaded" -> OfflineDownloadManager.downloadedTracks.value
+                            "device" -> {
+                                val scanned = DeviceAudioScanner.scanDeviceAudio(appContext)
+                                _uiState.update { it.copy(deviceTracks = scanned) }
+                                scanned
+                            }
+                            "uploaded" -> _uiState.value.uploadedTracks
                             "top50" -> store.getTop50Tracks()
                             "recent", "cached" -> _uiState.value.recentTracks
                             else -> emptyList()
@@ -512,6 +745,7 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
                         _uiState.update { it.copy(loadedCollection = detail, isCollectionLoading = false) }
                     }
                 }
+                else -> Unit
             }
         }
     }
@@ -523,7 +757,9 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
         val target = track ?: return
         val updated = store.toggleLike(target)
         _uiState.update { it.copy(likedTracks = updated) }
-        val liked = updated.any { it.id == target.id }
+        val liked = updated.any { it.id == target.id || (target.videoId.isNotEmpty() && it.videoId == target.videoId) }
+        DynamicIslandStateBus.update { it.copy(isLiked = liked) }
+        SpotyFlowBaseWidgetProvider.updateAllWidgetsAsync(appContext)
         showToast(if (liked) "Ditambahkan ke Disukai" else "Dihapus dari Disukai")
     }
 
@@ -556,6 +792,24 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
         val updated = store.createPlaylist(title, listOfNotNull(initialTrack))
         _uiState.update { it.copy(customPlaylists = updated) }
         showToast("Playlist \"$title\" dibuat")
+    }
+
+    fun renamePlaylist(playlistId: String, newTitle: String) {
+        val updated = store.renamePlaylist(playlistId, newTitle)
+        _uiState.update { it.copy(customPlaylists = updated) }
+        showToast("Nama playlist diperbarui")
+    }
+
+    fun deletePlaylist(playlistId: String) {
+        val updated = store.deletePlaylist(playlistId)
+        _uiState.update { it.copy(customPlaylists = updated) }
+        showToast("Playlist dihapus")
+    }
+
+    fun removeDuplicatesFromPlaylist(playlistId: String) {
+        val updated = store.removeDuplicatesFromPlaylist(playlistId)
+        _uiState.update { it.copy(customPlaylists = updated) }
+        showToast("Duplikat dibersihkan")
     }
 
     fun addTrackToPlaylist(playlistId: String, track: TrackItem) {
@@ -591,6 +845,7 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
         lyricsJob = viewModelScope.launch {
             val res = LyricsRepository.searchManual(title, artist)
             _uiState.update { it.copy(isLyricsLoading = false, lyricsResult = res) }
+            refreshLyricEnhancements(res)
             if (res.activeList.isEmpty()) showToast("Lirik tidak ditemukan")
         }
     }

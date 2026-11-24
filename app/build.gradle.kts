@@ -14,8 +14,8 @@ android {
         applicationId = "com.netease.cloudmusic"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0-native"
+        versionCode = 4
+        versionName = "2.0.0-native"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -87,4 +87,8 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.github.teamnewpipe:NewPipeExtractor:v0.26.0")
     implementation("com.google.guava:guava:33.3.1-android")
+
+    // Stage 4 Offline ML Kit Selfie Segmentation & EXIF Orientation Safety
+    implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 }
