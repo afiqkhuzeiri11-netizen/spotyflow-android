@@ -49,12 +49,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-apk
-          name: SpotyFlow Native v1.0.0
+          name: SpotyFlow Native v1.1.0
           body: |
-            SpotyFlow 100% Native Android (Stage 1) — Pure White x Full Liquid Glass 120 FPS.
-            - Kotlin 2.2.0 + Jetpack Compose BOM 2025.05.00 + Material 3
-            - GPU Liquid Glass (`dev.chrisbanes.haze:haze:1.6.10`)
-            - True Edge-to-Edge + Interactive Draggable Lens Dock + Fullscreen Now Playing & Live Lyrics
+            SpotyFlow 100% Native Android (Stage 2) — Pure White x Full Liquid Glass 120 FPS + Real Water Drops Navbar + Fast On-Device Streaming.
+            - Media3 ExoPlayer 1.6.1 + 180MB Local Cache + Background MediaSession
+            - Direct InnerTube ANDROID_VR + NewPipeExtractor v0.26.0 fallback
+            - Full Artist Profile, Full Album/Playlist Detail, Full User Profile, Live Synced Lyrics & Audio/Video Mode
           files: SpotyFlow.apk
           make_latest: true
         env:

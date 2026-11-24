@@ -1,6 +1,13 @@
 package com.spotyflow.android.ui.screens
 
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,155 +22,218 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Equalizer
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Layers
+import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Widgets
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import com.spotyflow.android.data.ArtistSummary
 import com.spotyflow.android.data.PlayerUiState
 import com.spotyflow.android.data.PreviewSheetData
+import com.spotyflow.android.ui.glass.SpotyArtwork
 import com.spotyflow.android.ui.glass.SpotyFlameVector
 import com.spotyflow.android.ui.glass.SpotyGlassCard
 import com.spotyflow.android.ui.theme.SpotyColors
 import com.spotyflow.android.ui.theme.SpotySpacing
+import java.io.File
 
 private data class ProfileMenuItem(
     val title: String,
     val subtitle: String,
     val icon: ImageVector,
-    val preview: PreviewSheetData
+    val onClickAction: () -> Unit
 )
 
 @Composable
 fun ProfileScreen(
     uiState: PlayerUiState,
     topHeaderClearance: Dp,
+    onUpdateProfile: (String, String, String) -> Unit,
+    onUpdateAvatar: (Uri) -> Unit,
+    onOpenLocalCollection: (String, String) -> Unit,
+    onOpenArtist: (ArtistSummary) -> Unit,
+    onOpenLibraryTab: () -> Unit,
     onOpenPreview: (PreviewSheetData) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val prof = uiState.userProfile
+    val streak = uiState.dailyStreak
+
+    var showEditDialog by remember { mutableStateOf(false) }
+    var editName by remember(prof.displayName) { mutableStateOf(prof.displayName) }
+    var editHandle by remember(prof.handle) { mutableStateOf(prof.handle) }
+    var editBio by remember(prof.bio) { mutableStateOf(prof.bio) }
+
+    val avatarPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) onUpdateAvatar(uri)
+    }
+
     val creativeItems = listOf(
         ProfileMenuItem(
             title = "Poster 3D Studio",
-            subtitle = "Kartu lagu 3D melayang di belakang subjek foto",
+            subtitle = "Foto sendiri + Copy Objek/Manusia di depan sampul musik",
             icon = Icons.Rounded.AutoAwesome,
-            preview = PreviewSheetData(
-                title = "Poster 3D Studio",
-                subtitle = "Bikin poster lagu bergaya depth-effect langsung di HP",
-                badge = "TAHAP 4",
-                bullets = listOf(
-                    "Pilih 1–5 lagu dengan sudut perspektif 3D interaktif",
-                    "Segmentasi subjek AI offline via Google ML Kit",
-                    "Simpan Full HD langsung ke Galeri"
+            onClickAction = {
+                onOpenPreview(
+                    PreviewSheetData(
+                        title = "Poster 3D Studio (Tahap 4)",
+                        subtitle = "Offline ML Kit Selfie Segmentation + 4-Layer Depth Sandwich",
+                        badge = "TAHAP 4",
+                        bullets = listOf(
+                            "Upload foto sendiri -> objek manusia otomatis di depan sampul 3D",
+                            "Dilengkapi Kuas Perapi Jari & simpan Full HD ke Galeri"
+                        )
+                    )
                 )
-            )
+            }
         ),
         ProfileMenuItem(
             title = "Statistik & Recap",
-            subtitle = "Menit dengar, top artis & kartu recap",
+            subtitle = "${streak.minutesToday} mnt hari ini • ${streak.count} hari beruntun",
             icon = Icons.Rounded.BarChart,
-            preview = PreviewSheetData(
-                title = "Statistik & Recap",
-                subtitle = "${uiState.listenedMinutesToday} menit hari ini • ${uiState.streakDays} hari beruntun",
-                badge = "STATISTIK",
-                bullets = listOf(
-                    "Lagu disukai: ${uiState.likedTrackIds.size} lagu",
-                    "Kartu Recap 5-Slide siap simpan & bagikan"
-                )
-            )
+            onClickAction = { onOpenLocalCollection("top50", "Top 50 & Statistik") }
         ),
         ProfileMenuItem(
             title = "Dengar Bersama",
-            subtitle = "Sinkronkan pemutaran real-time bareng teman",
+            subtitle = "Sinkronkan musik real-time bareng teman",
             icon = Icons.Rounded.Group,
-            preview = PreviewSheetData(
-                title = "Dengar Bersama (Jam)",
-                subtitle = "Buat ruang kode 6 huruf & dengarkan serentak",
-                badge = "SOSIAL",
-                bullets = listOf(
-                    "Host dan tamu selalu berada di detik lagu yang sama",
-                    "Bagikan kode ruang dalam satu ketukan"
+            onClickAction = {
+                onOpenPreview(
+                    PreviewSheetData(
+                        title = "Dengar Bersama (Jam)",
+                        subtitle = "Terhubung penuh di Tahap 3",
+                        badge = "TAHAP 3",
+                        bullets = listOf("Buat kode ruang 6 karakter & sinkronkan lagu serentak")
+                    )
                 )
-            )
+            }
         )
     )
 
     val systemItems = listOf(
         ProfileMenuItem(
             title = "Ekualiser & Audio",
-            subtitle = "5-Band Hardware DSP, Bass Boost & Varispeed",
+            subtitle = "5-Band Hardware DSP, Skip Silence & Varispeed",
             icon = Icons.Rounded.Equalizer,
-            preview = PreviewSheetData(
-                title = "Ekualiser & Audio Pro",
-                subtitle = "Kontrol penuh suara native Media3 ExoPlayer",
-                badge = "AUDIO DSP",
-                bullets = listOf(
-                    "5-Band Hardware Equalizer + Loudness Enhancer",
-                    "Skip Silence, Crossfade, & Normalisasi Audio (Tahap 2)"
+            onClickAction = {
+                onOpenPreview(
+                    PreviewSheetData(
+                        title = "Ekualiser & Audio Pro",
+                        subtitle = "Tersambung ke Media3 ExoPlayer di Tahap 3",
+                        badge = "TAHAP 3",
+                        bullets = listOf("5-Band Hardware EQ, Loudness Enhancer, Skip Silence, Crossfade")
+                    )
                 )
-            )
+            }
+        ),
+        ProfileMenuItem(
+            title = "Dynamic Island",
+            subtitle = "Custom Dynamic Island via Aksesibilitas (6 Gaya + Lirik Live)",
+            icon = Icons.Rounded.Layers,
+            onClickAction = {
+                onOpenPreview(
+                    PreviewSheetData(
+                        title = "Custom Dynamic Island Pro",
+                        subtitle = "StateBus sudah aktif di v1.1.0 — UI & Aksesibilitas hadir di Tahap 3",
+                        badge = "SIAP TAHAP 3",
+                        bullets = listOf(
+                            "6 gaya: iPhone, Liquid Glass, Kaca Bening, Warna Cover, Minimal, Neon",
+                            "Lirik sinkron real-time tepat di lubang kamera"
+                        )
+                    )
+                )
+            }
         ),
         ProfileMenuItem(
             title = "Pengaturan Widget",
             subtitle = "5 ukuran Widget Liquid Glass Home Screen",
             icon = Icons.Rounded.Widgets,
-            preview = PreviewSheetData(
-                title = "Pengaturan Widget",
-                subtitle = "Kustomisasi kilau kaca, sudut & warna aksen",
-                badge = "WIDGET",
-                bullets = listOf(
-                    "Mendukung 5 ukuran: 1x1, 2x2, 2x4, 4x1, dan 4x2",
-                    "Preview live 120 FPS tersinkron ke Home Screen Android"
+            onClickAction = {
+                onOpenPreview(
+                    PreviewSheetData(
+                        title = "5 Widget Home Screen",
+                        subtitle = "1x1, 2x2, 2x4, 4x1, 4x2 dengan Live Preview di Tahap 4",
+                        badge = "TAHAP 4",
+                        bullets = listOf("Kilau kaca, kebulatan sudut & aksen bisa dikustomisasi")
+                    )
                 )
-            )
+            }
         ),
         ProfileMenuItem(
-            title = "Dynamic Island",
-            subtitle = "Kapsul media & lirik live di Origin Island",
-            icon = Icons.Rounded.Layers,
-            preview = PreviewSheetData(
-                title = "Dynamic Island & Origin Island",
-                subtitle = "Kompatibel penuh dengan kapsul media Vivo & Android",
-                badge = "SISTEM",
-                bullets = listOf(
-                    "Package ID siap integrasi MediaSession Origin Island",
-                    "Tampilkan baris lirik aktif secara real-time di bilah atas"
-                )
-            )
+            title = "Izin Notifikasi & Baterai",
+            subtitle = "Pastikan pemutaran latar belakang tidak dihentikan sistem",
+            icon = Icons.Rounded.NotificationsActive,
+            onClickAction = {
+                try {
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.fromParts("package", context.packageName, null)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                } catch (_: Throwable) {
+                    // Safely ignore
+                }
+            }
         ),
         ProfileMenuItem(
-            title = "Pengaturan Aplikasi",
-            subtitle = "Tampilan 120Hz, cache aman & versi 1.0.0-native",
+            title = "Tentang SpotyFlow",
+            subtitle = "v1.1.0-native (Build 2) • Media3 1.6.1 + Haze 1.6.10",
             icon = Icons.Rounded.Settings,
-            preview = PreviewSheetData(
-                title = "SpotyFlow Native v1.0.0",
-                subtitle = "Kotlin + Jetpack Compose + Haze 1.6.10 GPU Liquid Glass",
-                badge = "NATIVE 120 FPS",
-                bullets = listOf(
-                    "True Edge-to-Edge dengan refresh rate maksimum layar",
-                    "Tahap 2: Streaming YouTube/InnerTube + ExoPlayer Background"
+            onClickAction = {
+                onOpenPreview(
+                    PreviewSheetData(
+                        title = "SpotyFlow Native v1.1.0",
+                        subtitle = "Pure White x Full Liquid Glass 120 FPS + Real Water Drops",
+                        badge = "BUILD 2",
+                        bullets = listOf(
+                            "Streaming cepat on-device (InnerTube + NewPipe v0.26.0)",
+                            "Media3 ExoPlayer 1.6.1 + Cache 180MB + Full Profile Browse"
+                        )
+                    )
                 )
-            )
+            }
         )
     )
 
@@ -175,14 +245,14 @@ fun ProfileScreen(
         ),
         verticalArrangement = Arrangement.spacedBy(SpotySpacing.SectionGap)
     ) {
-        // Profile Header Card + Summary
-        item(key = "profile_card") {
+        // 1. Full Interactive User Profile Card
+        item(key = "user_profile_card") {
             SpotyGlassCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = SpotySpacing.ScreenHorizontal),
                 shape = RoundedCornerShape(26.dp),
-                tintAlpha = 0.66f,
+                tintAlpha = 0.68f,
                 elevation = 12.dp
             ) {
                 Column(
@@ -192,95 +262,220 @@ fun ProfileScreen(
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Tap 76.dp Avatar -> Pick Photo from Gallery
                         Box(
                             modifier = Modifier
-                                .size(58.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    Brush.linearGradient(
-                                        colors = listOf(
-                                            SpotyColors.EmeraldCrystal,
-                                            SpotyColors.DeepEmerald
+                                .size(76.dp)
+                                .clickable {
+                                    avatarPicker.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                }
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clip(CircleShape)
+                                    .background(
+                                        Brush.linearGradient(
+                                            colors = listOf(SpotyColors.EmeraldCrystal, SpotyColors.DeepEmerald)
                                         )
                                     )
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Person,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(30.dp)
-                            )
+                                    .border(2.5.dp, Color.White, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Person,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(34.dp)
+                                )
+                                val cleanPath = prof.avatarPath.substringBefore("?")
+                                if (cleanPath.isNotBlank() && File(cleanPath).exists()) {
+                                    AsyncImage(
+                                        model = ImageRequest.Builder(context)
+                                            .data(File(cleanPath))
+                                            .crossfade(true)
+                                            .build(),
+                                        contentDescription = "Foto Profil",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .align(Alignment.BottomEnd)
+                                    .clip(CircleShape)
+                                    .background(SpotyColors.Slate900)
+                                    .border(1.5.dp, Color.White, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.PhotoCamera,
+                                    contentDescription = "Ganti Foto",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                            }
                         }
 
                         Spacer(modifier = Modifier.width(14.dp))
 
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Pendengar SpotyFlow",
+                                text = prof.displayName,
                                 fontSize = 18.sp,
                                 fontWeight = FontWeight.ExtraBold,
-                                color = SpotyColors.Slate900
+                                color = SpotyColors.Slate900,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = "SpotyFlow Native • Pure White Glass",
+                                text = prof.handle,
                                 fontSize = 12.5.sp,
-                                color = SpotyColors.Slate500
+                                fontWeight = FontWeight.SemiBold,
+                                color = SpotyColors.DeepEmerald
                             )
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(SpotyColors.Slate900.copy(alpha = 0.04f))
-                                .padding(12.dp)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                SpotyFlameVector(size = 20.dp)
-                                Column {
-                                    Text(
-                                        text = "${uiState.streakDays} Hari",
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = SpotyColors.Slate900
-                                    )
-                                    Text(
-                                        text = "Streak aktif",
-                                        fontSize = 11.sp,
-                                        color = SpotyColors.Slate500
-                                    )
-                                }
+                            if (prof.bio.isNotBlank()) {
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Text(
+                                    text = prof.bio,
+                                    fontSize = 12.sp,
+                                    color = SpotyColors.Slate500,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
 
                         Box(
                             modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(SpotyColors.EmeraldTint)
-                                .padding(12.dp)
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(SpotyColors.Slate900.copy(alpha = 0.08f))
+                                .clickable { showEditDialog = true }
+                                .padding(horizontal = 12.dp, vertical = 7.dp)
                         ) {
-                            Column {
-                                Text(
-                                    text = "${uiState.listenedMinutesToday} Menit",
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = SpotyColors.DeepEmerald
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Edit,
+                                    contentDescription = "Edit Profil",
+                                    tint = SpotyColors.Slate900,
+                                    modifier = Modifier.size(14.dp)
                                 )
                                 Text(
-                                    text = "Waktu dengar hari ini",
-                                    fontSize = 11.sp,
-                                    color = SpotyColors.Slate500
+                                    text = "Edit",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = SpotyColors.Slate900
+                                )
+                            }
+                        }
+                    }
+
+                    // 3 Aligned Glass Stat Pills: Disukai | Diikuti | Playlist
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        ProfileStatPill(
+                            label = "Disukai",
+                            value = "${uiState.likedTracks.size}",
+                            onClick = { onOpenLocalCollection("liked", "Disukai") },
+                            modifier = Modifier.weight(1f)
+                        )
+                        ProfileStatPill(
+                            label = "Diikuti",
+                            value = "${uiState.followedArtists.size}",
+                            onClick = {
+                                uiState.followedArtists.firstOrNull()?.let { onOpenArtist(it) }
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        ProfileStatPill(
+                            label = "Playlist",
+                            value = "${uiState.customPlaylists.size}",
+                            onClick = onOpenLibraryTab,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    // Streak Bar
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(SpotyColors.FlameOrange.copy(alpha = 0.08f))
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            SpotyFlameVector(size = 20.dp)
+                            Text(
+                                text = "${streak.count} hari beruntun • Percikan",
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = SpotyColors.Slate900
+                            )
+                        }
+                        Text(
+                            text = "${streak.minutesToday} mnt",
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = SpotyColors.DeepEmerald
+                        )
+                    }
+                }
+            }
+        }
+
+        // 2. Followed Artists Row
+        if (uiState.followedArtists.isNotEmpty()) {
+            item(key = "followed_artists") {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "Artis yang Kamu Ikuti",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = SpotyColors.Slate900,
+                        modifier = Modifier.padding(horizontal = SpotySpacing.ScreenHorizontal)
+                    )
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = SpotySpacing.ScreenHorizontal),
+                        horizontalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        items(uiState.followedArtists, key = { it.browseId.ifBlank { it.name } }) { artist ->
+                            Column(
+                                modifier = Modifier
+                                    .width(84.dp)
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .clickable { onOpenArtist(artist) }
+                                    .padding(vertical = 4.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                SpotyArtwork(
+                                    coverUrl = artist.avatarUrl,
+                                    accentColor = SpotyColors.EmeraldCrystal,
+                                    size = 74.dp,
+                                    cornerRadius = 999.dp
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = artist.name,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = SpotyColors.Slate900,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Center
                                 )
                             }
                         }
@@ -289,31 +484,100 @@ fun ProfileScreen(
             }
         }
 
-        // Creative & Social Menu Group
+        // 3. Creative & Social Menu Group
         item(key = "group_creative") {
-            ProfileMenuGroup(
-                eyebrow = "KREATIF & SOSIAL",
-                items = creativeItems,
-                onItemClick = { onOpenPreview(it.preview) }
-            )
+            ProfileMenuGroup(eyebrow = "KREATIF & SOSIAL", items = creativeItems)
         }
 
-        // Audio & System Menu Group
+        // 4. Audio & System Menu Group
         item(key = "group_system") {
-            ProfileMenuGroup(
-                eyebrow = "AUDIO & SISTEM",
-                items = systemItems,
-                onItemClick = { onOpenPreview(it.preview) }
-            )
+            ProfileMenuGroup(eyebrow = "AUDIO & SISTEM", items = systemItems)
         }
+    }
+
+    if (showEditDialog) {
+        AlertDialog(
+            onDismissRequest = { showEditDialog = false },
+            containerColor = Color.White,
+            title = { Text("Edit Profil Kamu", fontWeight = FontWeight.ExtraBold, color = SpotyColors.Slate900) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = editName,
+                        onValueChange = { editName = it },
+                        label = { Text("Nama Tampilan") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = editHandle,
+                        onValueChange = { editHandle = it },
+                        label = { Text("Username") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = editBio,
+                        onValueChange = { editBio = it },
+                        label = { Text("Bio Singkat") },
+                        maxLines = 3,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onUpdateProfile(editName, editHandle, editBio)
+                        showEditDialog = false
+                    }
+                ) {
+                    Text("Simpan", fontWeight = FontWeight.Bold, color = SpotyColors.DeepEmerald)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEditDialog = false }) {
+                    Text("Batal", color = SpotyColors.Slate500)
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun ProfileStatPill(
+    label: String,
+    value: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(SpotyColors.Slate900.copy(alpha = 0.045f))
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp, horizontal = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = value,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.ExtraBold,
+            color = SpotyColors.Slate900
+        )
+        Text(
+            text = label,
+            fontSize = 11.5.sp,
+            fontWeight = FontWeight.Medium,
+            color = SpotyColors.Slate500
+        )
     }
 }
 
 @Composable
 private fun ProfileMenuGroup(
     eyebrow: String,
-    items: List<ProfileMenuItem>,
-    onItemClick: (ProfileMenuItem) -> Unit
+    items: List<ProfileMenuItem>
 ) {
     Column(
         modifier = Modifier
@@ -341,7 +605,7 @@ private fun ProfileMenuGroup(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onItemClick(item) }
+                            .clickable(onClick = item.onClickAction)
                             .padding(horizontal = 14.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -359,9 +623,7 @@ private fun ProfileMenuGroup(
                                 modifier = Modifier.size(19.dp)
                             )
                         }
-
                         Spacer(modifier = Modifier.width(12.dp))
-
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = item.title,
@@ -375,7 +637,6 @@ private fun ProfileMenuGroup(
                                 color = SpotyColors.Slate500
                             )
                         }
-
                         Icon(
                             imageVector = Icons.Rounded.ChevronRight,
                             contentDescription = null,
@@ -383,7 +644,6 @@ private fun ProfileMenuGroup(
                             modifier = Modifier.size(20.dp)
                         )
                     }
-
                     if (idx < items.lastIndex) {
                         HorizontalDivider(
                             modifier = Modifier.padding(start = 64.dp, end = 16.dp),

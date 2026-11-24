@@ -27,6 +27,7 @@ import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.SkipNext
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -64,13 +65,14 @@ fun SpotyMiniPlayer(
 ) {
     val haptic = LocalHapticFeedback.current
     val track = uiState.currentTrack
+    val accent = uiState.ambientPalette.accent
+
     val animatedProgress by animateFloatAsState(
         targetValue = uiState.progress,
         animationSpec = spring(stiffness = Spring.StiffnessLow),
         label = "miniProgress"
     )
 
-    // Spring pop animation on Heart Like button
     var heartPop by remember { mutableStateOf(false) }
     val heartScale by animateFloatAsState(
         targetValue = if (heartPop) 1.32f else 1.0f,
@@ -110,7 +112,9 @@ fun SpotyMiniPlayer(
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
-                    onClick = onOpenNowPlaying
+                    onClick = {
+                        if (track != null) onOpenNowPlaying() else onTogglePlayPause()
+                    }
                 )
         ) {
             // Ultra-fine 2.5dp progress bar flush along inner top edge
@@ -128,7 +132,7 @@ fun SpotyMiniPlayer(
                         .fillMaxWidth(animatedProgress.coerceIn(0f, 1f))
                         .fillMaxHeight()
                         .clip(RoundedCornerShape(99.dp))
-                        .background(track.accentColor)
+                        .background(accent)
                 )
             }
 
@@ -139,8 +143,8 @@ fun SpotyMiniPlayer(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 SpotyArtwork(
-                    coverUrl = track.coverUrl,
-                    accentColor = track.accentColor,
+                    coverUrl = track?.coverUrl.orEmpty(),
+                    accentColor = accent,
                     size = 44.dp,
                     cornerRadius = 14.dp
                 )
@@ -152,7 +156,7 @@ fun SpotyMiniPlayer(
                     verticalArrangement = Arrangement.Center
                 ) {
                     Text(
-                        text = track.title,
+                        text = track?.title ?: "Siap Memutar",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = SpotyColors.Slate900,
@@ -160,7 +164,11 @@ fun SpotyMiniPlayer(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = track.artist,
+                        text = when {
+                            uiState.isBuffering -> "Memuat audio HD..."
+                            track != null -> track.artist
+                            else -> "Ketuk putar atau pilih lagu"
+                        },
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Normal,
                         color = SpotyColors.Slate500,
@@ -171,9 +179,11 @@ fun SpotyMiniPlayer(
 
                 IconButton(
                     onClick = {
-                        heartPop = true
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        onToggleLike()
+                        if (track != null) {
+                            heartPop = true
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onToggleLike()
+                        }
                     },
                     modifier = Modifier.size(36.dp)
                 ) {
@@ -211,12 +221,20 @@ fun SpotyMiniPlayer(
                         ),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = if (uiState.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                        contentDescription = if (uiState.isPlaying) "Jeda" else "Putar",
-                        tint = Color.White,
-                        modifier = Modifier.size(22.dp)
-                    )
+                    if (uiState.isBuffering) {
+                        CircularProgressIndicator(
+                            color = Color.White,
+                            strokeWidth = 2.2.dp,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = if (uiState.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                            contentDescription = if (uiState.isPlaying) "Jeda" else "Putar",
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
                 }
 
                 IconButton(

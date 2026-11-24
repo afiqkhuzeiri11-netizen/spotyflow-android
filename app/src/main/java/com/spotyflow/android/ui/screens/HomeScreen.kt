@@ -24,10 +24,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -59,14 +62,16 @@ fun HomeScreen(
     uiState: PlayerUiState,
     topHeaderClearance: Dp,
     onSelectMood: (String) -> Unit,
-    onPlayTrack: (TrackItem) -> Unit,
+    onPlayTrack: (TrackItem, List<TrackItem>) -> Unit,
     onTogglePlayPause: () -> Unit,
     onOpenNowPlaying: () -> Unit,
+    onOpenTrackMenu: (TrackItem) -> Unit,
     onOpenPreview: (PreviewSheetData) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val activeTrack = uiState.currentTrack
-    val displayTracks = uiState.filteredHomeTracks
+    val feedTracks = uiState.homeTracks
+    val recentTracks = if (uiState.recentTracks.isNotEmpty()) uiState.recentTracks else feedTracks.take(8)
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -85,7 +90,10 @@ fun HomeScreen(
                 shape = RoundedCornerShape(26.dp),
                 tintAlpha = 0.66f,
                 elevation = 12.dp,
-                onClick = onOpenNowPlaying
+                onClick = {
+                    if (activeTrack != null) onOpenNowPlaying()
+                    else if (feedTracks.isNotEmpty()) onPlayTrack(feedTracks.first(), feedTracks)
+                }
             ) {
                 Row(
                     modifier = Modifier
@@ -94,8 +102,8 @@ fun HomeScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     SpotyArtwork(
-                        coverUrl = activeTrack.coverUrl,
-                        accentColor = activeTrack.accentColor,
+                        coverUrl = activeTrack?.coverUrl.orEmpty(),
+                        accentColor = uiState.ambientPalette.accent,
                         size = 72.dp,
                         cornerRadius = 18.dp
                     )
@@ -108,7 +116,7 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Text(
-                                text = "LANJUT DENGAR",
+                                text = if (uiState.isBuffering) "MEMUAT STREAM..." else "LANJUT DENGAR",
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
                                 letterSpacing = 1.4.sp,
@@ -123,7 +131,7 @@ fun HomeScreen(
                         }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = activeTrack.title,
+                            text = activeTrack?.title ?: "Siap Memutar Musik",
                             fontSize = 16.sp,
                             fontWeight = FontWeight.ExtraBold,
                             color = SpotyColors.Slate900,
@@ -132,7 +140,7 @@ fun HomeScreen(
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = activeTrack.artist,
+                            text = activeTrack?.artist ?: "Pilih lagu di bawah atau cari favoritmu",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Medium,
                             color = SpotyColors.Slate500,
@@ -157,18 +165,26 @@ fun HomeScreen(
                             .clickable(onClick = onTogglePlayPause),
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = if (uiState.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                            contentDescription = if (uiState.isPlaying) "Jeda" else "Putar",
-                            tint = Color.White,
-                            modifier = Modifier.size(26.dp)
-                        )
+                        if (uiState.isBuffering) {
+                            CircularProgressIndicator(
+                                color = Color.White,
+                                strokeWidth = 2.5.dp,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        } else {
+                            Icon(
+                                imageVector = if (uiState.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                contentDescription = if (uiState.isPlaying) "Jeda" else "Putar",
+                                tint = Color.White,
+                                modifier = Modifier.size(26.dp)
+                            )
+                        }
                     }
                 }
             }
         }
 
-        // 2. Mood Glass Pills (Horizontal Scroll)
+        // 2. Mood Glass Pills (Live InnerTube Feeds)
         item(key = "mood_pills") {
             LazyRow(
                 contentPadding = PaddingValues(horizontal = SpotySpacing.ScreenHorizontal),
@@ -226,8 +242,9 @@ fun HomeScreen(
             }
         }
 
-        // 3. Inline Glass Streak Bar (Compact Single Row + Vector Flame)
+        // 3. Inline Glass Streak Bar
         item(key = "streak_bar") {
+            val streak = uiState.dailyStreak
             SpotyGlassCard(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -239,11 +256,11 @@ fun HomeScreen(
                     onOpenPreview(
                         PreviewSheetData(
                             title = "Streak & Percikan Harian",
-                            subtitle = "${uiState.streakDays} hari beruntun • ${uiState.listenedMinutesToday} menit hari ini",
+                            subtitle = "${streak.count} hari beruntun • Rekor terbaik ${streak.best} hari",
                             badge = "STREAK AKTIF",
                             bullets = listOf(
-                                "Target harian: 30 menit mendengarkan musik",
-                                "Tersinkron otomatis dengan Statistik & Recap"
+                                "${streak.minutesToday} menit mendengarkan hari ini",
+                                "Tersimpan otomatis secara permanen di perangkat"
                             )
                         )
                     )
@@ -269,21 +286,20 @@ fun HomeScreen(
 
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "${uiState.streakDays} hari beruntun",
+                            text = "${streak.count} hari beruntun",
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
                             color = SpotyColors.Slate900
                         )
                         Text(
-                            text = "${uiState.listenedMinutesToday} mnt hari ini",
+                            text = "${streak.minutesToday} mnt hari ini",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,
                             color = SpotyColors.Slate500
                         )
                     }
 
-                    // Slim daily goal capsule bar
-                    val goalRatio = (uiState.listenedMinutesToday / 30f).coerceIn(0.15f, 1f)
+                    val goalRatio = (streak.minutesToday / 30f).coerceIn(0.12f, 1f)
                     Column(horizontalAlignment = Alignment.End) {
                         Text(
                             text = "${(goalRatio * 100).toInt()}%",
@@ -328,59 +344,72 @@ fun HomeScreen(
                         fontWeight = FontWeight.ExtraBold,
                         color = SpotyColors.Slate900
                     )
-                    Text(
-                        text = "Lihat semua",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = SpotyColors.DeepEmerald,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable { onSelectMood("Semua") }
-                            .padding(horizontal = 6.dp, vertical = 4.dp)
-                    )
+                    if (feedTracks.isNotEmpty()) {
+                        Text(
+                            text = "Putar semua",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = SpotyColors.DeepEmerald,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onPlayTrack(feedTracks.first(), feedTracks) }
+                                .padding(horizontal = 6.dp, vertical = 4.dp)
+                        )
+                    }
                 }
 
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = SpotySpacing.ScreenHorizontal),
-                    horizontalArrangement = Arrangement.spacedBy(SpotySpacing.CardGap)
-                ) {
-                    items(displayTracks, key = { "card_${it.id}" }) { track ->
-                        SpotyGlassCard(
-                            modifier = Modifier.width(148.dp),
-                            shape = RoundedCornerShape(22.dp),
-                            tintAlpha = 0.62f,
-                            elevation = 10.dp,
-                            onClick = { onPlayTrack(track) }
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(10.dp)
+                if (uiState.isHomeLoading && feedTracks.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(color = SpotyColors.EmeraldCrystal)
+                    }
+                } else {
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = SpotySpacing.ScreenHorizontal),
+                        horizontalArrangement = Arrangement.spacedBy(SpotySpacing.CardGap)
+                    ) {
+                        items(feedTracks, key = { "card_${it.id}" }) { track ->
+                            SpotyGlassCard(
+                                modifier = Modifier.width(148.dp),
+                                shape = RoundedCornerShape(22.dp),
+                                tintAlpha = 0.62f,
+                                elevation = 10.dp,
+                                onClick = { onPlayTrack(track, feedTracks) }
                             ) {
-                                SpotyArtwork(
-                                    coverUrl = track.coverUrl,
-                                    accentColor = track.accentColor,
-                                    size = 128.dp,
-                                    cornerRadius = 16.dp
-                                )
-                                Spacer(modifier = Modifier.height(10.dp))
-                                Text(
-                                    text = track.title,
-                                    fontSize = 13.5.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (track.id == activeTrack.id) SpotyColors.DeepEmerald else SpotyColors.Slate900,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = track.artist,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Normal,
-                                    color = SpotyColors.Slate500,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(10.dp)
+                                ) {
+                                    SpotyArtwork(
+                                        coverUrl = track.coverUrl,
+                                        accentColor = track.accentColor,
+                                        size = 128.dp,
+                                        cornerRadius = 16.dp
+                                    )
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text(
+                                        text = track.title,
+                                        fontSize = 13.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (track.id == activeTrack?.id) SpotyColors.DeepEmerald else SpotyColors.Slate900,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = track.artist,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Normal,
+                                        color = SpotyColors.Slate500,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
                     }
@@ -388,88 +417,101 @@ fun HomeScreen(
             }
         }
 
-        // 5. Section "Baru Diputar" — Clean Spacious Glass Track List
-        item(key = "recent_section") {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = SpotySpacing.ScreenHorizontal),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text(
-                    text = "Baru Diputar",
-                    fontSize = 19.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = SpotyColors.Slate900
-                )
-
-                SpotyGlassCard(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(24.dp),
-                    tintAlpha = 0.64f,
-                    elevation = 10.dp
+        // 5. Section "Baru Diputar"
+        if (recentTracks.isNotEmpty()) {
+            item(key = "recent_section") {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = SpotySpacing.ScreenHorizontal),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        uiState.tracks.forEachIndexed { idx, track ->
-                            val isActive = track.id == activeTrack.id
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onPlayTrack(track) }
-                                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                SpotyArtwork(
-                                    coverUrl = track.coverUrl,
-                                    accentColor = track.accentColor,
-                                    size = 48.dp,
-                                    cornerRadius = 12.dp
-                                )
+                    Text(
+                        text = if (uiState.recentTracks.isNotEmpty()) "Baru Diputar" else "Rekomendasi Cepat",
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = SpotyColors.Slate900
+                    )
 
-                                Spacer(modifier = Modifier.width(12.dp))
+                    SpotyGlassCard(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(24.dp),
+                        tintAlpha = 0.64f,
+                        elevation = 10.dp
+                    ) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            recentTracks.take(10).forEachIndexed { idx, track ->
+                                val isActive = track.id == activeTrack?.id
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onPlayTrack(track, recentTracks) }
+                                        .padding(start = 14.dp, end = 6.dp, top = 11.dp, bottom = 11.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    SpotyArtwork(
+                                        coverUrl = track.coverUrl,
+                                        accentColor = track.accentColor,
+                                        size = 48.dp,
+                                        cornerRadius = 12.dp
+                                    )
 
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = track.title,
-                                        fontSize = 14.5.sp,
-                                        fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.SemiBold,
-                                        color = if (isActive) SpotyColors.DeepEmerald else SpotyColors.Slate900,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    Text(
-                                        text = "${track.artist} • ${track.album}",
-                                        fontSize = 12.sp,
-                                        color = SpotyColors.Slate500,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = track.title,
+                                            fontSize = 14.5.sp,
+                                            fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                            color = if (isActive) SpotyColors.DeepEmerald else SpotyColors.Slate900,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = track.artist,
+                                            fontSize = 12.sp,
+                                            color = SpotyColors.Slate500,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+
+                                    if (isActive) {
+                                        SpotyMiniEqBars(
+                                            isPlaying = uiState.isPlaying,
+                                            color = SpotyColors.EmeraldCrystal
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                    } else if (track.durationSec > 0) {
+                                        Text(
+                                            text = formatDuration(track.durationSec),
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = SpotyColors.Slate500
+                                        )
+                                    }
+
+                                    IconButton(
+                                        onClick = { onOpenTrackMenu(track) },
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.MoreVert,
+                                            contentDescription = "Opsi",
+                                            tint = SpotyColors.Slate500,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
                                 }
 
-                                Spacer(modifier = Modifier.width(10.dp))
-
-                                if (isActive) {
-                                    SpotyMiniEqBars(
-                                        isPlaying = uiState.isPlaying,
-                                        color = SpotyColors.EmeraldCrystal
-                                    )
-                                } else {
-                                    Text(
-                                        text = formatDuration(track.durationSec),
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = SpotyColors.Slate500
+                                if (idx < minOf(10, recentTracks.size) - 1) {
+                                    HorizontalDivider(
+                                        modifier = Modifier.padding(start = 74.dp, end = 16.dp),
+                                        thickness = 0.5.dp,
+                                        color = SpotyColors.HairlineDivider
                                     )
                                 }
-                            }
-
-                            if (idx < uiState.tracks.lastIndex) {
-                                HorizontalDivider(
-                                    modifier = Modifier.padding(start = 74.dp, end = 16.dp),
-                                    thickness = 0.5.dp,
-                                    color = SpotyColors.HairlineDivider
-                                )
                             }
                         }
                     }

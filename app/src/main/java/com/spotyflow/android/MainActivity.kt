@@ -1,5 +1,8 @@
 package com.spotyflow.android
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color as AndroidColor
 import android.os.Build
 import android.os.Bundle
@@ -7,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
@@ -29,44 +33,71 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.PlaylistAdd
+import androidx.compose.material.icons.rounded.QueuePlayNext
+import androidx.compose.material.icons.rounded.Radio
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.spotyflow.android.data.DetailDestination
 import com.spotyflow.android.data.PreviewSheetData
 import com.spotyflow.android.data.SpotyTab
 import com.spotyflow.android.data.SpotyViewModel
+import com.spotyflow.android.data.TrackItem
+import com.spotyflow.android.data.remote.SpotyHttpClient
+import com.spotyflow.android.player.SpotyFlowPlaybackService
 import com.spotyflow.android.ui.components.SpotyLiquidDock
 import com.spotyflow.android.ui.components.SpotyMiniPlayer
 import com.spotyflow.android.ui.components.SpotyNowPlayingSheet
 import com.spotyflow.android.ui.glass.LocalBgHazeState
 import com.spotyflow.android.ui.glass.LocalContentHazeState
 import com.spotyflow.android.ui.glass.PureWhiteAmbientCanvas
+import com.spotyflow.android.ui.glass.SpotyArtwork
 import com.spotyflow.android.ui.glass.SpotyFloatingGlass
 import com.spotyflow.android.ui.glass.SpotyGlassCircleButton
+import com.spotyflow.android.ui.screens.ArtistProfileScreen
+import com.spotyflow.android.ui.screens.CollectionDetailScreen
 import com.spotyflow.android.ui.screens.HomeScreen
 import com.spotyflow.android.ui.screens.LibraryScreen
 import com.spotyflow.android.ui.screens.ProfileScreen
@@ -79,6 +110,11 @@ import dev.chrisbanes.haze.hazeSource
 import java.util.Calendar
 
 class MainActivity : ComponentActivity() {
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { /* Permissions handled gracefully */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(
@@ -93,9 +129,41 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         requestHighestRefreshRate()
 
+        SpotyFlowPlaybackService.ensureNotificationChannels(this)
+        SpotyHttpClient.warmUpAsync()
+        requestRuntimePermissionsOnce()
+
         setContent {
             SpotyTheme {
                 SpotyFlowApp()
+            }
+        }
+    }
+
+    private fun requestRuntimePermissionsOnce() {
+        val prefs = getSharedPreferences("spotyflow_runtime_perms", MODE_PRIVATE)
+        if (prefs.getBoolean("requested_v2", false)) return
+        prefs.edit().putBoolean("requested_v2", true).apply()
+
+        val needed = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                needed.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                needed.add(Manifest.permission.READ_MEDIA_AUDIO)
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                needed.add(Manifest.permission.BLUETOOTH_CONNECT)
+            }
+        }
+        if (needed.isNotEmpty()) {
+            try {
+                permissionLauncher.launch(needed.toTypedArray())
+            } catch (_: Throwable) {
+                // Non-fatal
             }
         }
     }
@@ -133,7 +201,8 @@ private fun dynamicGreeting(): String {
 @Composable
 fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
     val uiState by vm.uiState.collectAsState()
-    val activeTrack = uiState.currentTrack
+    val context = LocalContext.current
+    val pal = uiState.ambientPalette
 
     // Two strictly separated sibling HazeStates (0% Haze 1.6.10 runtime crash!)
     val bgHazeState = remember { HazeState() }
@@ -151,56 +220,108 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
                 .fillMaxSize()
                 .hazeSource(state = contentHazeState)
         ) {
-            // LAYER 0 (Sibling): Pure White Pastel Ambient Canvas
+            // LAYER 0 (Sibling): Adaptive Pure White Pastel Ambient Canvas
             PureWhiteAmbientCanvas(
-                orbPrimaryTarget = activeTrack.orbPrimary,
-                orbSecondaryTarget = activeTrack.orbSecondary,
-                orbTertiaryTarget = activeTrack.orbTertiary,
+                orbPrimaryTarget = pal.orbPrimary,
+                orbSecondaryTarget = pal.orbSecondary,
+                orbTertiaryTarget = pal.orbTertiary,
                 modifier = Modifier
                     .fillMaxSize()
                     .hazeSource(state = bgHazeState)
             )
 
-            // Scrollable Tab Content (Sibling of Layer 0 -> safely blurs bgHazeState!)
+            // Scrollable Content (Main 4 Tabs OR Full Artist/Collection Profile Detail)
             CompositionLocalProvider(LocalBgHazeState provides bgHazeState) {
-                AnimatedContent(
-                    targetState = uiState.activeTab,
-                    transitionSpec = { fadeIn() togetherWith fadeOut() },
-                    label = "tabTransition",
-                    modifier = Modifier.fillMaxSize()
-                ) { tab ->
-                    when (tab) {
-                        SpotyTab.Home -> HomeScreen(
-                            uiState = uiState,
-                            topHeaderClearance = topHeaderClearance,
-                            onSelectMood = vm::selectMood,
+                val activeDetail = uiState.currentDetail
+                if (activeDetail != null) {
+                    when (activeDetail) {
+                        is DetailDestination.Artist -> ArtistProfileScreen(
+                            fallbackName = activeDetail.artistName,
+                            profile = uiState.loadedArtistProfile,
+                            isLoading = uiState.isArtistLoading,
+                            isFollowed = vm.isArtistFollowed(
+                                uiState.loadedArtistProfile?.browseId ?: activeDetail.browseId,
+                                uiState.loadedArtistProfile?.name ?: activeDetail.artistName
+                            ),
+                            currentTrackId = uiState.currentTrack?.id,
+                            isPlaying = uiState.isPlaying,
+                            onBack = { vm.popDetail() },
+                            onPlayAll = { tracks, shuf -> vm.playQueue(tracks, 0, shuf) },
                             onPlayTrack = vm::playTrack,
-                            onTogglePlayPause = vm::togglePlayPause,
-                            onOpenNowPlaying = { vm.openNowPlaying(false) },
-                            onOpenPreview = vm::openPreviewSheet
+                            onToggleFollow = vm::toggleFollowArtist,
+                            onOpenCollection = { col -> vm.openCollectionDetail(col.browseId, col.title) },
+                            onOpenRelatedArtist = { rel -> vm.openArtistProfile(rel.browseId, rel.name) },
+                            onOpenTrackMenu = vm::openTrackMenu
                         )
 
-                        SpotyTab.Search -> SearchScreen(
-                            uiState = uiState,
-                            topHeaderClearance = topHeaderClearance,
-                            onQueryChange = vm::updateSearchQuery,
-                            onSubmitQuery = vm::submitSearchQuery,
-                            onRemoveHistory = vm::removeSearchHistory,
-                            onSelectFilter = vm::selectSearchFilter,
-                            onPlayTrack = vm::playTrack
+                        is DetailDestination.Collection -> CollectionDetailScreen(
+                            fallbackTitle = activeDetail.fallbackTitle,
+                            detail = uiState.loadedCollection,
+                            isLoading = uiState.isCollectionLoading,
+                            isSaved = vm.isCollectionSaved(activeDetail.browseId),
+                            currentTrackId = uiState.currentTrack?.id,
+                            isPlaying = uiState.isPlaying,
+                            onBack = { vm.popDetail() },
+                            onPlayAll = { tracks, shuf -> vm.playQueue(tracks, 0, shuf) },
+                            onPlayTrack = vm::playTrack,
+                            onToggleSave = vm::toggleSaveCollection,
+                            onOpenArtist = { bId, name -> vm.openArtistProfile(bId, name) },
+                            onOpenTrackMenu = vm::openTrackMenu
                         )
+                    }
+                } else {
+                    AnimatedContent(
+                        targetState = uiState.activeTab,
+                        transitionSpec = { fadeIn() togetherWith fadeOut() },
+                        label = "tabTransition",
+                        modifier = Modifier.fillMaxSize()
+                    ) { tab ->
+                        when (tab) {
+                            SpotyTab.Home -> HomeScreen(
+                                uiState = uiState,
+                                topHeaderClearance = topHeaderClearance,
+                                onSelectMood = vm::selectMood,
+                                onPlayTrack = vm::playTrack,
+                                onTogglePlayPause = vm::togglePlayPause,
+                                onOpenNowPlaying = { vm.openNowPlaying(false) },
+                                onOpenTrackMenu = vm::openTrackMenu,
+                                onOpenPreview = vm::openPreviewSheet
+                            )
 
-                        SpotyTab.Library -> LibraryScreen(
-                            uiState = uiState,
-                            topHeaderClearance = topHeaderClearance,
-                            onOpenPreview = vm::openPreviewSheet
-                        )
+                            SpotyTab.Search -> SearchScreen(
+                                uiState = uiState,
+                                topHeaderClearance = topHeaderClearance,
+                                onQueryChange = vm::updateSearchQuery,
+                                onSubmitQuery = vm::submitSearchQuery,
+                                onRemoveHistory = vm::removeSearchHistory,
+                                onSelectFilter = vm::selectSearchFilter,
+                                onPlayTrack = vm::playTrack,
+                                onOpenArtist = { a -> vm.openArtistProfile(a.browseId, a.name) },
+                                onOpenCollection = { c -> vm.openCollectionDetail(c.browseId, c.title) },
+                                onOpenTrackMenu = vm::openTrackMenu
+                            )
 
-                        SpotyTab.Profile -> ProfileScreen(
-                            uiState = uiState,
-                            topHeaderClearance = topHeaderClearance,
-                            onOpenPreview = vm::openPreviewSheet
-                        )
+                            SpotyTab.Library -> LibraryScreen(
+                                uiState = uiState,
+                                topHeaderClearance = topHeaderClearance,
+                                onOpenLocalCollection = vm::openLocalCollection,
+                                onOpenCustomPlaylist = vm::openCustomPlaylist,
+                                onOpenSavedCollection = { c -> vm.openCollectionDetail(c.browseId, c.title) },
+                                onCreatePlaylist = { title -> vm.createPlaylist(title) },
+                                onOpenPreview = vm::openPreviewSheet
+                            )
+
+                            SpotyTab.Profile -> ProfileScreen(
+                                uiState = uiState,
+                                topHeaderClearance = topHeaderClearance,
+                                onUpdateProfile = vm::updateUserProfile,
+                                onUpdateAvatar = vm::updateUserAvatar,
+                                onOpenLocalCollection = vm::openLocalCollection,
+                                onOpenArtist = { a -> vm.openArtistProfile(a.browseId, a.name) },
+                                onOpenLibraryTab = { vm.selectTab(SpotyTab.Library) },
+                                onOpenPreview = vm::openPreviewSheet
+                            )
+                        }
                     }
                 }
             }
@@ -210,33 +331,30 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
         // LAYER 2 (Sibling of Layer 1 -> Real 120 FPS Floating Liquid Glass!)
         // =====================================================================
         CompositionLocalProvider(LocalContentHazeState provides contentHazeState) {
-            // Floating Minimalist Top Glass Header
-            TopGlassBar(
-                activeTab = uiState.activeTab,
-                onRecognizeClick = {
-                    vm.openPreviewSheet(
-                        PreviewSheetData(
-                            title = "Kenali Lagu",
-                            subtitle = "Deteksi lagu di sekitarmu lewat mikrofon atau potongan lirik",
-                            badge = "AUDIO RADAR",
-                            bullets = listOf(
-                                "Analisis suara cepat dengan gelombang radar real-time",
-                                "Langsung putar & simpan ke Pustaka (Tahap 2)"
+            // Floating Top Header (only shown on main 4 tabs; detail screens have their own back header)
+            if (uiState.currentDetail == null) {
+                TopGlassBar(
+                    activeTab = uiState.activeTab,
+                    onRecognizeClick = {
+                        vm.openPreviewSheet(
+                            PreviewSheetData(
+                                title = "Kenali Lagu",
+                                subtitle = "Deteksi lagu lewat mikrofon & radar (hadir penuh di Tahap 3)",
+                                badge = "AUDIO RADAR",
+                                bullets = listOf("Mencocokkan lirik ke LRCLIB + YouTube Music")
                             )
                         )
-                    )
-                },
-                onSettingsClick = {
-                    vm.selectTab(SpotyTab.Profile)
-                },
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-                    .padding(horizontal = SpotySpacing.ScreenHorizontal, vertical = 10.dp)
-            )
+                    },
+                    onSettingsClick = { vm.selectTab(SpotyTab.Profile) },
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = SpotySpacing.ScreenHorizontal, vertical = 10.dp)
+                )
+            }
 
-            // Floating Bottom Stack: Mini-Player + 10.dp Gap + Interactive Draggable Lens Dock
+            // Floating Bottom Stack: Mini-Player + 10.dp Gap + Real Water Drops Liquid Glass Navbar
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -255,7 +373,8 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
 
                 SpotyLiquidDock(
                     activeTab = uiState.activeTab,
-                    onSelectTab = vm::selectTab
+                    onSelectTab = vm::selectTab,
+                    waterDropsEnabled = uiState.waterDropsEnabled
                 )
             }
 
@@ -281,18 +400,97 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
                     onNext = vm::nextTrack,
                     onPrevious = vm::previousTrack,
                     onSeekFraction = vm::seekToFraction,
-                    onSeekSecond = vm::seekToSecond,
+                    onSeekMs = vm::seekToMs,
                     onToggleLike = { vm.toggleLike() },
                     onToggleShuffle = vm::toggleShuffle,
                     onCycleRepeat = vm::cycleRepeat,
                     onSetPlayerMode = vm::setPlayerMode,
                     onSetVolume = vm::setVolume,
                     onToggleLyrics = vm::toggleLyricsView,
+                    onOpenManualLyrics = { vm.setManualLyricsOpen(true) },
+                    onOpenQueue = { vm.setQueueSheetOpen(true) },
+                    onOpenArtist = { bId, name -> vm.openArtistProfile(bId, name) },
+                    onOpenTrackMenu = vm::openTrackMenu,
                     onOpenPreview = vm::openPreviewSheet
                 )
             }
 
-            // Glass Preview Bottom Sheet (ensures zero dead buttons across the app)
+            // Queue Bottom Sheet
+            AnimatedVisibility(
+                visible = uiState.isQueueSheetOpen,
+                enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
+                exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 })
+            ) {
+                QueueGlassSheet(
+                    queue = uiState.queue,
+                    currentIdx = uiState.queueIndex,
+                    onSelectIndex = { idx ->
+                        uiState.queue.getOrNull(idx)?.let { vm.playTrack(it, uiState.queue) }
+                        vm.setQueueSheetOpen(false)
+                    },
+                    onDismiss = { vm.setQueueSheetOpen(false) }
+                )
+            }
+
+            // Track Context Menu Sheet (⋮)
+            AnimatedVisibility(
+                visible = uiState.menuTrack != null,
+                enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
+                exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 })
+            ) {
+                uiState.menuTrack?.let { track ->
+                    val isLiked = uiState.likedTracks.any { it.id == track.id }
+                    TrackMenuGlassSheet(
+                        track = track,
+                        isLiked = isLiked,
+                        onDismiss = vm::closeTrackMenu,
+                        onPlayNext = {
+                            vm.addTrackNext(track)
+                            vm.closeTrackMenu()
+                        },
+                        onAddToQueue = {
+                            vm.addTrackToQueue(track)
+                            vm.closeTrackMenu()
+                        },
+                        onToggleLike = {
+                            vm.toggleLike(track)
+                            vm.closeTrackMenu()
+                        },
+                        onOpenArtist = {
+                            vm.openArtistProfile(track.artistBrowseId, track.artist)
+                        },
+                        onOpenAlbum = {
+                            if (track.albumBrowseId.isNotBlank()) {
+                                vm.openCollectionDetail(track.albumBrowseId, track.album)
+                            } else {
+                                vm.showToast("Detail album tidak tersedia untuk lagu ini")
+                                vm.closeTrackMenu()
+                            }
+                        },
+                        onStartRadio = {
+                            vm.closeTrackMenu()
+                            vm.startRadioForTrack(track)
+                        },
+                        onShare = {
+                            vm.closeTrackMenu()
+                            try {
+                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(
+                                        Intent.EXTRA_TEXT,
+                                        "${track.title} — ${track.artist}\nhttps://music.youtube.com/watch?v=${track.videoId}"
+                                    )
+                                }
+                                context.startActivity(Intent.createChooser(sendIntent, "Bagikan Lagu"))
+                            } catch (_: Throwable) {
+                                // Ignore
+                            }
+                        }
+                    )
+                }
+            }
+
+            // Preview Bottom Sheet
             AnimatedVisibility(
                 visible = uiState.activePreviewSheet != null,
                 enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
@@ -305,7 +503,74 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
                     )
                 }
             }
+
+            // Floating Toast Pill
+            AnimatedVisibility(
+                visible = uiState.toastMessage != null,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 166.dp)
+            ) {
+                uiState.toastMessage?.let { msg ->
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(SpotyColors.Slate900)
+                            .padding(horizontal = 18.dp, vertical = 10.dp)
+                    ) {
+                        Text(
+                            text = msg,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                }
+            }
         }
+    }
+
+    // Manual Lyrics Search Dialog
+    if (uiState.isManualLyricsOpen) {
+        val cur = uiState.currentTrack
+        var qTitle by remember(cur?.id) { mutableStateOf(cur?.title.orEmpty()) }
+        var qArtist by remember(cur?.id) { mutableStateOf(cur?.artist.orEmpty()) }
+        AlertDialog(
+            onDismissRequest = { vm.setManualLyricsOpen(false) },
+            containerColor = Color.White,
+            title = { Text("Cari Lirik Manual", fontWeight = FontWeight.ExtraBold, color = SpotyColors.Slate900) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = qTitle,
+                        onValueChange = { qTitle = it },
+                        label = { Text("Judul Lagu") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = qArtist,
+                        onValueChange = { qArtist = it },
+                        label = { Text("Nama Artis") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.searchLyricsManual(qTitle, qArtist) }) {
+                    Text("Cari", fontWeight = FontWeight.Bold, color = SpotyColors.DeepEmerald)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { vm.setManualLyricsOpen(false) }) {
+                    Text("Batal", color = SpotyColors.Slate500)
+                }
+            }
+        )
     }
 }
 
@@ -335,9 +600,7 @@ private fun TopGlassBar(
             tintAlpha = 0.56f,
             elevation = 8.dp
         ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp)
-            ) {
+            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp)) {
                 Text(
                     text = "SPOTYFLOW",
                     fontSize = 10.sp,
@@ -378,6 +641,257 @@ private fun TopGlassBar(
 }
 
 @Composable
+private fun QueueGlassSheet(
+    queue: List<TrackItem>,
+    currentIdx: Int,
+    onSelectIndex: (Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(SpotyColors.Slate900.copy(alpha = 0.28f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss
+            ),
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        SpotyFloatingGlass(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(14.dp)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {}
+                ),
+            shape = RoundedCornerShape(28.dp),
+            tintAlpha = 0.90f,
+            elevation = 22.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Antrean (${queue.size} lagu)",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = SpotyColors.Slate900
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(SpotyColors.Slate900.copy(alpha = 0.08f))
+                            .clickable(onClick = onDismiss),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = "Tutup",
+                            tint = SpotyColors.Slate900,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 360.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    itemsIndexed(queue) { idx, t ->
+                        val active = idx == currentIdx
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (active) SpotyColors.EmeraldTint else Color.Transparent)
+                                .clickable { onSelectIndex(idx) }
+                                .padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            SpotyArtwork(
+                                coverUrl = t.coverUrl,
+                                accentColor = t.accentColor,
+                                size = 42.dp,
+                                cornerRadius = 10.dp
+                            )
+                            Spacer(modifier = Modifier.size(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = t.title,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (active) SpotyColors.DeepEmerald else SpotyColors.Slate900,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = t.artist,
+                                    fontSize = 12.sp,
+                                    color = SpotyColors.Slate500,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrackMenuGlassSheet(
+    track: TrackItem,
+    isLiked: Boolean,
+    onDismiss: () -> Unit,
+    onPlayNext: () -> Unit,
+    onAddToQueue: () -> Unit,
+    onToggleLike: () -> Unit,
+    onOpenArtist: () -> Unit,
+    onOpenAlbum: () -> Unit,
+    onStartRadio: () -> Unit,
+    onShare: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(SpotyColors.Slate900.copy(alpha = 0.28f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss
+            ),
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        SpotyFloatingGlass(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(14.dp)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {}
+                ),
+            shape = RoundedCornerShape(28.dp),
+            tintAlpha = 0.90f,
+            elevation = 22.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    SpotyArtwork(
+                        coverUrl = track.coverUrl,
+                        accentColor = track.accentColor,
+                        size = 48.dp,
+                        cornerRadius = 12.dp
+                    )
+                    Spacer(modifier = Modifier.size(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = track.title,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = SpotyColors.Slate900,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = track.artist,
+                            fontSize = 12.5.sp,
+                            color = SpotyColors.Slate500,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(SpotyColors.Slate900.copy(alpha = 0.08f))
+                            .clickable(onClick = onDismiss),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = "Tutup",
+                            tint = SpotyColors.Slate900,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                MenuSheetActionRow(Icons.Rounded.QueuePlayNext, "Putar Berikutnya", onPlayNext)
+                MenuSheetActionRow(Icons.Rounded.PlaylistAdd, "Tambah ke Antrean", onAddToQueue)
+                MenuSheetActionRow(
+                    if (isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                    if (isLiked) "Hapus dari Disukai" else "Tambahkan ke Disukai",
+                    onToggleLike
+                )
+                MenuSheetActionRow(Icons.Rounded.Person, "Lihat Profil Artis", onOpenArtist)
+                if (track.albumBrowseId.isNotBlank()) {
+                    MenuSheetActionRow(Icons.Rounded.Album, "Lihat Album", onOpenAlbum)
+                }
+                MenuSheetActionRow(Icons.Rounded.Radio, "Mulai Radio Lagu Ini", onStartRadio)
+                MenuSheetActionRow(Icons.Rounded.Share, "Bagikan Lagu", onShare)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MenuSheetActionRow(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = SpotyColors.Slate900,
+            modifier = Modifier.size(20.dp)
+        )
+        Text(
+            text = label,
+            fontSize = 14.5.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = SpotyColors.Slate900
+        )
+    }
+}
+
+@Composable
 private fun GlassPreviewSheetOverlay(
     data: PreviewSheetData,
     onDismiss: () -> Unit
@@ -404,7 +918,7 @@ private fun GlassPreviewSheetOverlay(
                     onClick = {}
                 ),
             shape = RoundedCornerShape(28.dp),
-            tintAlpha = 0.86f,
+            tintAlpha = 0.88f,
             elevation = 22.dp
         ) {
             Column(
@@ -432,7 +946,6 @@ private fun GlassPreviewSheetOverlay(
                             color = SpotyColors.DeepEmerald
                         )
                     }
-
                     Box(
                         modifier = Modifier
                             .size(32.dp)
@@ -449,7 +962,6 @@ private fun GlassPreviewSheetOverlay(
                         )
                     }
                 }
-
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
                         text = data.title,
@@ -463,7 +975,6 @@ private fun GlassPreviewSheetOverlay(
                         color = SpotyColors.Slate500
                     )
                 }
-
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     data.bullets.forEach { bullet ->
                         Row(
@@ -485,9 +996,7 @@ private fun GlassPreviewSheetOverlay(
                         }
                     }
                 }
-
                 Spacer(modifier = Modifier.height(4.dp))
-
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()

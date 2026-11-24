@@ -1,6 +1,7 @@
 package com.spotyflow.android.ui.components
 
 import androidx.activity.compose.BackHandler
+import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
@@ -47,12 +48,13 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Repeat
 import androidx.compose.material.icons.rounded.RepeatOne
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
-import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VolumeUp
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider
@@ -75,16 +77,23 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
 import com.spotyflow.android.data.PlayerMode
 import com.spotyflow.android.data.PlayerUiState
 import com.spotyflow.android.data.PreviewSheetData
 import com.spotyflow.android.data.RepeatMode
-import com.spotyflow.android.data.formatDuration
-import com.spotyflow.android.data.formatRemaining
+import com.spotyflow.android.data.TrackItem
+import com.spotyflow.android.data.formatDurationMs
+import com.spotyflow.android.data.formatRemainingMs
+import com.spotyflow.android.player.SpotyFlowPlaybackService
 import com.spotyflow.android.ui.glass.LocalBgHazeState
 import com.spotyflow.android.ui.glass.LocalContentHazeState
 import com.spotyflow.android.ui.glass.PureWhiteAmbientCanvas
@@ -98,6 +107,7 @@ import dev.chrisbanes.haze.hazeSource
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
+@OptIn(UnstableApi::class)
 @Composable
 fun SpotyNowPlayingSheet(
     uiState: PlayerUiState,
@@ -106,16 +116,23 @@ fun SpotyNowPlayingSheet(
     onNext: () -> Unit,
     onPrevious: () -> Unit,
     onSeekFraction: (Float) -> Unit,
-    onSeekSecond: (Int) -> Unit,
+    onSeekMs: (Long) -> Unit,
     onToggleLike: () -> Unit,
     onToggleShuffle: () -> Unit,
     onCycleRepeat: () -> Unit,
     onSetPlayerMode: (PlayerMode) -> Unit,
     onSetVolume: (Float) -> Unit,
     onToggleLyrics: () -> Unit,
+    onOpenManualLyrics: () -> Unit,
+    onOpenQueue: () -> Unit,
+    onOpenArtist: (String, String) -> Unit,
+    onOpenTrackMenu: (TrackItem) -> Unit,
     onOpenPreview: (PreviewSheetData) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val track = uiState.currentTrack ?: return
+    val pal = uiState.ambientPalette
+
     BackHandler(enabled = true) {
         if (uiState.isLyricsVisible) onToggleLyrics() else onDismiss()
     }
@@ -123,9 +140,6 @@ fun SpotyNowPlayingSheet(
     val haptic = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
     val dragOffsetY = remember { Animatable(0f) }
-    val track = uiState.currentTrack
-
-    // Isolated sibling HazeState for Now Playing sheet (0% crash risk!)
     val sheetBgHaze = remember { HazeState() }
 
     val coverScale by animateFloatAsState(
@@ -165,11 +179,11 @@ fun SpotyNowPlayingSheet(
                 )
             }
     ) {
-        // Layer 0 (Sibling): Pure White Pastel Ambient Canvas
+        // Layer 0 (Sibling): Adaptive Pure White Pastel Ambient Canvas
         PureWhiteAmbientCanvas(
-            orbPrimaryTarget = track.orbPrimary,
-            orbSecondaryTarget = track.orbSecondary,
-            orbTertiaryTarget = track.orbTertiary,
+            orbPrimaryTarget = pal.orbPrimary,
+            orbSecondaryTarget = pal.orbSecondary,
+            orbTertiaryTarget = pal.orbTertiary,
             modifier = Modifier
                 .fillMaxSize()
                 .hazeSource(state = sheetBgHaze)
@@ -188,7 +202,6 @@ fun SpotyNowPlayingSheet(
                     .padding(horizontal = 20.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
-                // Drag indicator pill
                 Box(
                     modifier = Modifier
                         .align(Alignment.CenterHorizontally)
@@ -200,7 +213,7 @@ fun SpotyNowPlayingSheet(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // Top Header Bar: Down Button | Audio/Video Pill | More
+                // Top Header Bar: Down | Audio/Video Pill | More
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -215,7 +228,6 @@ fun SpotyNowPlayingSheet(
                         )
                     }
 
-                    // Audio | Video Liquid Glass Pill Switch
                     SpotyFloatingGlass(
                         shape = RoundedCornerShape(999.dp),
                         tintAlpha = 0.62f,
@@ -239,20 +251,7 @@ fun SpotyNowPlayingSheet(
                     }
 
                     SpotyGlassCircleButton(
-                        onClick = {
-                            onOpenPreview(
-                                PreviewSheetData(
-                                    title = track.title,
-                                    subtitle = "${track.artist} • ${track.album}",
-                                    badge = "OPSI LAGU",
-                                    bullets = listOf(
-                                        "Tambahkan ke Antrean & Putar Berikutnya",
-                                        "Unduh Offline Audio M4A (Hadir di Tahap 2)",
-                                        "Mulai Radio Lagu Serupa & Lihat Profil Artis"
-                                    )
-                                )
-                            )
-                        },
+                        onClick = { onOpenTrackMenu(track) },
                         size = 42.dp
                     ) {
                         Icon(
@@ -264,7 +263,7 @@ fun SpotyNowPlayingSheet(
                     }
                 }
 
-                // Center Stage: Smooth Crossfade between Hero Album Art & Pure White Synced Lyrics
+                // Center Stage: Hero Artwork / Live ExoPlayer VideoView / Live Synced Lyrics
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -280,11 +279,44 @@ fun SpotyNowPlayingSheet(
                         if (showLyrics) {
                             SyncedLyricsGlassCard(
                                 uiState = uiState,
-                                onTapLine = { sec ->
-                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                    onSeekSecond(sec)
-                                }
+                                onTapLine = { timeMs ->
+                                    if (timeMs >= 0L) {
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        onSeekMs(timeMs)
+                                    }
+                                },
+                                onManualSearch = onOpenManualLyrics
                             )
+                        } else if (uiState.playerMode == PlayerMode.Video) {
+                            // Live Native Media3 PlayerView inside 28.dp Glass Frame
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(16f / 10f)
+                                    .shadow(
+                                        elevation = 20.dp,
+                                        shape = RoundedCornerShape(28.dp),
+                                        ambientColor = pal.accent.copy(alpha = 0.35f)
+                                    )
+                                    .clip(RoundedCornerShape(28.dp))
+                                    .background(Color.Black),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                AndroidView(
+                                    factory = { ctx ->
+                                        PlayerView(ctx).apply {
+                                            useController = false
+                                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                            player = SpotyFlowPlaybackService.getActiveExoPlayer()
+                                        }
+                                    },
+                                    update = { view ->
+                                        val active = SpotyFlowPlaybackService.getActiveExoPlayer()
+                                        if (view.player !== active) view.player = active
+                                    },
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
                         } else {
                             Box(
                                 modifier = Modifier
@@ -296,58 +328,29 @@ fun SpotyNowPlayingSheet(
                                     },
                                 contentAlignment = Alignment.Center
                             ) {
-                                // Colored pastel halo underneath hero artwork
                                 Box(
                                     modifier = Modifier
                                         .fillMaxSize(0.92f)
                                         .shadow(
                                             elevation = 28.dp,
                                             shape = RoundedCornerShape(30.dp),
-                                            ambientColor = track.accentColor.copy(alpha = 0.45f),
-                                            spotColor = track.accentColor.copy(alpha = 0.55f)
+                                            ambientColor = pal.accent.copy(alpha = 0.45f),
+                                            spotColor = pal.accent.copy(alpha = 0.55f)
                                         )
                                 )
                                 SpotyArtwork(
                                     coverUrl = track.coverUrl,
-                                    accentColor = track.accentColor,
+                                    accentColor = pal.accent,
                                     size = null,
                                     cornerRadius = 28.dp,
                                     modifier = Modifier.fillMaxSize()
                                 )
-                                if (uiState.playerMode == PlayerMode.Video) {
-                                    SpotyFloatingGlass(
-                                        modifier = Modifier
-                                            .align(Alignment.BottomCenter)
-                                            .padding(14.dp),
-                                        shape = RoundedCornerShape(999.dp),
-                                        tintAlpha = 0.72f
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Rounded.Videocam,
-                                                contentDescription = null,
-                                                tint = SpotyColors.Slate900,
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                            Text(
-                                                text = "Mode Video HD siap di Tahap 2",
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = SpotyColors.Slate900
-                                            )
-                                        }
-                                    }
-                                }
                             }
                         }
                     }
                 }
 
-                // Song Info Row: Title + Artist on left | Like + 3D Poster on right
+                // Song Info Row: Title + Clickable Artist -> Full Artist Profile!
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -366,10 +369,13 @@ fun SpotyNowPlayingSheet(
                         Text(
                             text = track.artist,
                             fontSize = 15.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = SpotyColors.Slate500,
+                            fontWeight = FontWeight.SemiBold,
+                            color = SpotyColors.DeepEmerald,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { onOpenArtist(track.artistBrowseId, track.artist) }
                         )
                     }
 
@@ -395,13 +401,12 @@ fun SpotyNowPlayingSheet(
                             onClick = {
                                 onOpenPreview(
                                     PreviewSheetData(
-                                        title = "Poster 3D Studio",
-                                        subtitle = "Kartu lagu 3D melayang di belakang subjek fotomu",
+                                        title = "Poster 3D Studio (Tahap 4)",
+                                        subtitle = "Copy objek/manusia fotomu di depan sampul musik ini",
                                         badge = "ML KIT DEPTH",
                                         bullets = listOf(
-                                            "Pilih 1–5 lagu favorit dengan sudut 3D interaktif",
-                                            "Segmentasi subjek AI offline (ML Kit)",
-                                            "Simpan Full HD langsung ke Galeri"
+                                            "Foto sendiri otomatis jadi latar belakang + objek manusia di depan kartu 3D",
+                                            "Kuas Perapi Jari + simpan Full HD ke Galeri"
                                         )
                                     )
                                 )
@@ -432,13 +437,12 @@ fun SpotyNowPlayingSheet(
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 14.dp)
                     ) {
-                        // Interactive Live Seekbar + Positive / Negative Remaining Timestamps
                         Slider(
                             value = uiState.progress,
                             onValueChange = onSeekFraction,
                             colors = SliderDefaults.colors(
                                 thumbColor = SpotyColors.Slate900,
-                                activeTrackColor = track.accentColor,
+                                activeTrackColor = pal.accent,
                                 inactiveTrackColor = SpotyColors.Slate900.copy(alpha = 0.12f)
                             ),
                             modifier = Modifier
@@ -452,13 +456,13 @@ fun SpotyNowPlayingSheet(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                text = formatDuration(uiState.positionSec),
+                                text = formatDurationMs(uiState.positionMs),
                                 fontSize = 11.5.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = SpotyColors.Slate500
                             )
                             Text(
-                                text = formatRemaining(uiState.positionSec, track.durationSec),
+                                text = formatRemainingMs(uiState.positionMs, uiState.durationMs),
                                 fontSize = 11.5.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = SpotyColors.Slate500
@@ -467,7 +471,6 @@ fun SpotyNowPlayingSheet(
 
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        // 5 Symmetric Primary Controls
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -480,7 +483,7 @@ fun SpotyNowPlayingSheet(
                                 Icon(
                                     imageVector = Icons.Rounded.Shuffle,
                                     contentDescription = "Acak",
-                                    tint = if (uiState.isShuffle) track.accentColor else SpotyColors.Slate500,
+                                    tint = if (uiState.isShuffle) pal.accent else SpotyColors.Slate500,
                                     modifier = Modifier.size(22.dp)
                                 )
                             }
@@ -507,7 +510,7 @@ fun SpotyNowPlayingSheet(
                                         elevation = 14.dp,
                                         shape = CircleShape,
                                         ambientColor = SpotyColors.Slate900.copy(alpha = 0.30f),
-                                        spotColor = track.accentColor.copy(alpha = 0.38f)
+                                        spotColor = pal.accent.copy(alpha = 0.38f)
                                     )
                                     .clip(CircleShape)
                                     .background(SpotyColors.Slate900)
@@ -517,12 +520,20 @@ fun SpotyNowPlayingSheet(
                                     },
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(
-                                    imageVector = if (uiState.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                    contentDescription = if (uiState.isPlaying) "Jeda" else "Putar",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(32.dp)
-                                )
+                                if (uiState.isBuffering) {
+                                    CircularProgressIndicator(
+                                        color = Color.White,
+                                        strokeWidth = 2.8.dp,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = if (uiState.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                        contentDescription = if (uiState.isPlaying) "Jeda" else "Putar",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(32.dp)
+                                    )
+                                }
                             }
 
                             IconButton(
@@ -547,7 +558,7 @@ fun SpotyNowPlayingSheet(
                                 Icon(
                                     imageVector = if (uiState.repeatMode == RepeatMode.One) Icons.Rounded.RepeatOne else Icons.Rounded.Repeat,
                                     contentDescription = "Ulangi",
-                                    tint = if (uiState.repeatMode != RepeatMode.Off) track.accentColor else SpotyColors.Slate500,
+                                    tint = if (uiState.repeatMode != RepeatMode.Off) pal.accent else SpotyColors.Slate500,
                                     modifier = Modifier.size(22.dp)
                                 )
                             }
@@ -555,7 +566,7 @@ fun SpotyNowPlayingSheet(
 
                         Spacer(modifier = Modifier.height(6.dp))
 
-                        // Volume Slider + Bluetooth Output Icon
+                        // Real System Volume Slider + Bluetooth Output
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
@@ -584,11 +595,10 @@ fun SpotyNowPlayingSheet(
                                     onOpenPreview(
                                         PreviewSheetData(
                                             title = "Output Audio & Bluetooth",
-                                            subtitle = "Perangkat saat ini: Speaker Perangkat",
+                                            subtitle = "Volume tersinkron langsung ke AudioManager Android",
                                             badge = "MEDIA OUTPUT",
                                             bullets = listOf(
-                                                "Pindah cepat antara Speaker, TWS Bluetooth, & Android Auto",
-                                                "Mendukung Volume Hardware & Audio Offload di Tahap 2"
+                                                "Mendukung Speaker, Headset Kabel, TWS Bluetooth, & Android Auto"
                                             )
                                         )
                                     )
@@ -606,7 +616,6 @@ fun SpotyNowPlayingSheet(
 
                         Spacer(modifier = Modifier.height(6.dp))
 
-                        // 4 Symmetric Bottom Utility Actions
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceEvenly
@@ -615,59 +624,35 @@ fun SpotyNowPlayingSheet(
                                 icon = Icons.Rounded.Lyrics,
                                 label = "Lirik",
                                 active = uiState.isLyricsVisible,
-                                accentColor = track.accentColor,
+                                accentColor = pal.accent,
                                 onClick = onToggleLyrics
                             )
                             PlayerBottomAction(
                                 icon = Icons.Rounded.QueueMusic,
                                 label = "Antrean",
                                 active = false,
-                                accentColor = track.accentColor,
-                                onClick = {
-                                    onOpenPreview(
-                                        PreviewSheetData(
-                                            title = "Antrean Berikutnya (${uiState.tracks.size} lagu)",
-                                            subtitle = "Sedang diputar: ${track.title}",
-                                            badge = "ANTREAN",
-                                            bullets = uiState.tracks.take(4).map { "${it.title} — ${it.artist}" }
-                                        )
-                                    )
-                                }
+                                accentColor = pal.accent,
+                                onClick = onOpenQueue
                             )
                             PlayerBottomAction(
                                 icon = Icons.Rounded.Share,
                                 label = "Bagikan",
                                 active = false,
-                                accentColor = track.accentColor,
-                                onClick = {
-                                    onOpenPreview(
-                                        PreviewSheetData(
-                                            title = "Bagikan Lagu",
-                                            subtitle = "${track.title} — ${track.artist}",
-                                            badge = "BAGIKAN",
-                                            bullets = listOf(
-                                                "Buat kartu Poster 3D untuk Story & TikTok",
-                                                "Salin tautan dengar cepat ke teman"
-                                            )
-                                        )
-                                    )
-                                }
+                                accentColor = pal.accent,
+                                onClick = { onOpenTrackMenu(track) }
                             )
                             PlayerBottomAction(
                                 icon = Icons.Rounded.Bedtime,
                                 label = "Timer Tidur",
                                 active = false,
-                                accentColor = track.accentColor,
+                                accentColor = pal.accent,
                                 onClick = {
                                     onOpenPreview(
                                         PreviewSheetData(
                                             title = "Timer Tidur",
-                                            subtitle = "Hentikan musik otomatis dengan efek memudar",
+                                            subtitle = "Kontrol penuh 15–60 mnt & memudar hadir di Tahap 3",
                                             badge = "TIMER",
-                                            bullets = listOf(
-                                                "Pilihan cepat: 15, 30, 45, 60 menit",
-                                                "Opsi berhenti tepat di akhir lagu saat ini"
-                                            )
+                                            bullets = listOf("Opsi berhenti otomatis di akhir lagu saat ini")
                                         )
                                     )
                                 }
@@ -736,14 +721,15 @@ private fun PlayerBottomAction(
 @Composable
 private fun SyncedLyricsGlassCard(
     uiState: PlayerUiState,
-    onTapLine: (Int) -> Unit
+    onTapLine: (Long) -> Unit,
+    onManualSearch: () -> Unit
 ) {
-    val lines = uiState.currentTrack.lyrics
+    val lines = uiState.lyricsResult.activeList
     val activeIdx = uiState.activeLyricIndex
     val listState = rememberLazyListState()
 
-    LaunchedEffect(activeIdx) {
-        if (lines.isNotEmpty()) {
+    LaunchedEffect(activeIdx, uiState.lyricsResult.isSynced) {
+        if (lines.isNotEmpty() && uiState.lyricsResult.isSynced) {
             listState.animateScrollToItem((activeIdx - 1).coerceAtLeast(0))
         }
     }
@@ -751,38 +737,111 @@ private fun SyncedLyricsGlassCard(
     SpotyGlassCard(
         modifier = Modifier.fillMaxSize(),
         shape = RoundedCornerShape(28.dp),
-        tintAlpha = 0.66f,
+        tintAlpha = 0.68f,
         elevation = 12.dp
     ) {
-        LazyColumn(
-            state = listState,
-            contentPadding = PaddingValues(horizontal = 22.dp, vertical = 28.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            itemsIndexed(lines) { idx, line ->
-                val isActive = idx == activeIdx
-                val scale by animateFloatAsState(
-                    targetValue = if (isActive) 1.03f else 0.98f,
-                    animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
-                    label = "lyricScale_$idx"
-                )
-                Text(
-                    text = line.text,
-                    fontSize = if (isActive) 22.sp else 18.sp,
-                    lineHeight = if (isActive) 29.sp else 24.sp,
-                    fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.SemiBold,
-                    color = if (isActive) SpotyColors.Slate900 else SpotyColors.Slate500.copy(alpha = 0.55f),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .graphicsLayer {
-                            scaleX = scale
-                            scaleY = scale
+        Box(modifier = Modifier.fillMaxSize()) {
+            when {
+                uiState.isLyricsLoading -> {
+                    Column(
+                        modifier = Modifier.align(Alignment.Center),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        CircularProgressIndicator(color = SpotyColors.EmeraldCrystal)
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Mencari lirik sinkron...",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = SpotyColors.Slate500
+                        )
+                    }
+                }
+                lines.isEmpty() -> {
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "Lirik belum ditemukan",
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = SpotyColors.Slate900
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Ketuk Cari Manual di bawah untuk memasukkan judul & artis.",
+                            fontSize = 13.sp,
+                            color = SpotyColors.Slate500,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+                else -> {
+                    LazyColumn(
+                        state = listState,
+                        contentPadding = PaddingValues(start = 22.dp, end = 22.dp, top = 24.dp, bottom = 72.dp),
+                        verticalArrangement = Arrangement.spacedBy(18.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        itemsIndexed(lines) { idx, line ->
+                            val isActive = uiState.lyricsResult.isSynced && idx == activeIdx
+                            val scale by animateFloatAsState(
+                                targetValue = if (isActive) 1.03f else 0.98f,
+                                animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+                                label = "lyricScale_$idx"
+                            )
+                            Text(
+                                text = line.text,
+                                fontSize = if (isActive) 22.sp else 18.sp,
+                                lineHeight = if (isActive) 29.sp else 24.sp,
+                                fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                color = if (isActive || !uiState.lyricsResult.isSynced) SpotyColors.Slate900
+                                else SpotyColors.Slate500.copy(alpha = 0.55f),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .graphicsLayer {
+                                        scaleX = scale
+                                        scaleY = scale
+                                    }
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { onTapLine(line.timeMs) }
+                                    .padding(vertical = 2.dp)
+                            )
                         }
-                        .clip(RoundedCornerShape(12.dp))
-                        .clickable { onTapLine(line.timeSec) }
-                        .padding(vertical = 2.dp)
-                )
+                    }
+                }
+            }
+
+            // Bottom floating Manual Search pill inside Lyrics card
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(12.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(SpotyColors.Slate900)
+                    .clickable(onClick = onManualSearch)
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Search,
+                        contentDescription = "Cari Manual",
+                        tint = Color.White,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Text(
+                        text = "Cari Manual",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
             }
         }
     }

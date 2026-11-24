@@ -26,9 +26,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -41,12 +44,16 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.spotyflow.android.data.ArtistSummary
+import com.spotyflow.android.data.CollectionSummary
 import com.spotyflow.android.data.PlayerUiState
 import com.spotyflow.android.data.SampleCatalog
+import com.spotyflow.android.data.SearchFilter
 import com.spotyflow.android.data.TrackItem
 import com.spotyflow.android.data.formatDuration
 import com.spotyflow.android.ui.glass.SpotyArtwork
@@ -62,10 +69,16 @@ fun SearchScreen(
     onQueryChange: (String) -> Unit,
     onSubmitQuery: (String) -> Unit,
     onRemoveHistory: (String) -> Unit,
-    onSelectFilter: (String) -> Unit,
-    onPlayTrack: (TrackItem) -> Unit,
+    onSelectFilter: (SearchFilter) -> Unit,
+    onPlayTrack: (TrackItem, List<TrackItem>) -> Unit,
+    onOpenArtist: (ArtistSummary) -> Unit,
+    onOpenCollection: (CollectionSummary) -> Unit,
+    onOpenTrackMenu: (TrackItem) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val filters = SearchFilter.entries
+    val results = uiState.searchResults
+
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(
@@ -104,7 +117,7 @@ fun SearchScreen(
                     ) {
                         if (uiState.searchQuery.isEmpty()) {
                             Text(
-                                text = "Cari lagu, artis, album, atau suasana...",
+                                text = "Cari lagu, artis, album, atau playlist...",
                                 fontSize = 14.5.sp,
                                 color = SpotyColors.Slate500,
                                 maxLines = 1,
@@ -147,13 +160,13 @@ fun SearchScreen(
             }
         }
 
-        // Filter Chips
+        // Filter Chips: Semua | Lagu | Video | Artis | Album | Playlist
         item(key = "search_filters") {
             LazyRow(
                 contentPadding = PaddingValues(horizontal = SpotySpacing.ScreenHorizontal),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(SampleCatalog.searchFilters, key = { it }) { filter ->
+                items(filters, key = { it.name }) { filter ->
                     val selected = uiState.searchFilter == filter
                     if (selected) {
                         Box(
@@ -164,7 +177,7 @@ fun SearchScreen(
                                 .padding(horizontal = 16.dp, vertical = 9.dp)
                         ) {
                             Text(
-                                text = filter,
+                                text = filter.label,
                                 fontSize = 12.5.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = Color.White
@@ -178,7 +191,7 @@ fun SearchScreen(
                             onClick = { onSelectFilter(filter) }
                         ) {
                             Text(
-                                text = filter,
+                                text = filter.label,
                                 fontSize = 12.5.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = SpotyColors.Slate700,
@@ -247,7 +260,7 @@ fun SearchScreen(
                 }
             }
 
-            // 2-Column Mood Grid with Soft Corner Pastel Glow
+            // 2-Column Mood Grid
             item(key = "mood_grid") {
                 Column(
                     modifier = Modifier
@@ -262,8 +275,7 @@ fun SearchScreen(
                         color = SpotyColors.Slate900
                     )
 
-                    val rows = SampleCatalog.moodCards.chunked(2)
-                    rows.forEach { pair ->
+                    SampleCatalog.moodCards.chunked(2).forEach { pair ->
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(SpotySpacing.CardGap)
@@ -279,7 +291,6 @@ fun SearchScreen(
                                     onClick = { onSubmitQuery(card.id) }
                                 ) {
                                     Box(modifier = Modifier.fillMaxSize()) {
-                                        // Soft corner pastel glow
                                         Canvas(modifier = Modifier.fillMaxSize()) {
                                             drawCircle(
                                                 brush = Brush.radialGradient(
@@ -327,63 +338,137 @@ fun SearchScreen(
                     }
                 }
             }
-        } else {
-            // Live Filtered Results
-            item(key = "search_results") {
-                val results = uiState.searchResults
-                Column(
+        } else if (uiState.isSearching) {
+            item(key = "search_loading") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 40.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = SpotyColors.EmeraldCrystal)
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Mencari \"${uiState.searchQuery}\"...",
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = SpotyColors.Slate500
+                        )
+                    }
+                }
+            }
+        } else if (results.isEmpty) {
+            item(key = "search_empty") {
+                SpotyGlassCard(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = SpotySpacing.ScreenHorizontal),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    shape = RoundedCornerShape(22.dp),
+                    tintAlpha = 0.64f
                 ) {
-                    Text(
-                        text = "Hasil (${results.size})",
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = SpotyColors.Slate900
-                    )
-
-                    if (results.isEmpty()) {
-                        SpotyGlassCard(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(22.dp),
-                            tintAlpha = 0.64f
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "Tidak ada hasil untuk \"${uiState.searchQuery}\"",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = SpotyColors.Slate900
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Coba kata kunci lagu, artis, atau album lain.",
+                            fontSize = 12.5.sp,
+                            color = SpotyColors.Slate500
+                        )
+                    }
+                }
+            }
+        } else {
+            // Artists Carousel (Clickable -> Full Artist Profile!)
+            if (results.artists.isNotEmpty()) {
+                item(key = "sr_artists") {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            text = "Artis",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = SpotyColors.Slate900,
+                            modifier = Modifier.padding(horizontal = SpotySpacing.ScreenHorizontal)
+                        )
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = SpotySpacing.ScreenHorizontal),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp)
                         ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(24.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                Text(
-                                    text = "Tidak ada hasil untuk \"${uiState.searchQuery}\"",
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = SpotyColors.Slate900
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = "Coba kata kunci seperti Tulus, Santai, Fokus, atau Malam.",
-                                    fontSize = 12.5.sp,
-                                    color = SpotyColors.Slate500
-                                )
+                            items(results.artists, key = { it.browseId }) { artist ->
+                                Column(
+                                    modifier = Modifier
+                                        .width(92.dp)
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .clickable { onOpenArtist(artist) }
+                                        .padding(vertical = 4.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    SpotyArtwork(
+                                        coverUrl = artist.avatarUrl,
+                                        accentColor = SpotyColors.EmeraldCrystal,
+                                        size = 82.dp,
+                                        cornerRadius = 999.dp
+                                    )
+                                    Spacer(modifier = Modifier.height(7.dp))
+                                    Text(
+                                        text = artist.name,
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = SpotyColors.Slate900,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        textAlign = TextAlign.Center
+                                    )
+                                    Text(
+                                        text = "Artis",
+                                        fontSize = 11.sp,
+                                        color = SpotyColors.Slate500
+                                    )
+                                }
                             }
                         }
-                    } else {
+                    }
+                }
+            }
+
+            // Tracks Section
+            if (results.tracks.isNotEmpty()) {
+                item(key = "sr_tracks") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = SpotySpacing.ScreenHorizontal),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text(
+                            text = "Lagu (${results.tracks.size})",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = SpotyColors.Slate900
+                        )
                         SpotyGlassCard(
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(24.dp),
                             tintAlpha = 0.64f
                         ) {
                             Column(modifier = Modifier.fillMaxWidth()) {
-                                results.forEachIndexed { idx, track ->
-                                    val isActive = track.id == uiState.currentTrack.id
+                                results.tracks.take(20).forEachIndexed { idx, track ->
+                                    val isActive = track.id == uiState.currentTrack?.id
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .clickable { onPlayTrack(track) }
-                                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                                            .clickable { onPlayTrack(track, results.tracks) }
+                                            .padding(start = 14.dp, end = 6.dp, top = 11.dp, bottom = 11.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         SpotyArtwork(
@@ -403,7 +488,7 @@ fun SearchScreen(
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                             Text(
-                                                text = "${track.artist} • ${track.album}",
+                                                text = track.artist,
                                                 fontSize = 12.sp,
                                                 color = SpotyColors.Slate500,
                                                 maxLines = 1,
@@ -412,15 +497,27 @@ fun SearchScreen(
                                         }
                                         if (isActive) {
                                             SpotyMiniEqBars(isPlaying = uiState.isPlaying)
-                                        } else {
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                        } else if (track.durationSec > 0) {
                                             Text(
                                                 text = formatDuration(track.durationSec),
                                                 fontSize = 12.sp,
                                                 color = SpotyColors.Slate500
                                             )
                                         }
+                                        IconButton(
+                                            onClick = { onOpenTrackMenu(track) },
+                                            modifier = Modifier.size(36.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.MoreVert,
+                                                contentDescription = "Opsi",
+                                                tint = SpotyColors.Slate500,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
                                     }
-                                    if (idx < results.lastIndex) {
+                                    if (idx < minOf(20, results.tracks.size) - 1) {
                                         HorizontalDivider(
                                             modifier = Modifier.padding(start = 74.dp, end = 16.dp),
                                             thickness = 0.5.dp,
@@ -430,6 +527,83 @@ fun SearchScreen(
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // Albums Carousel (Clickable -> Full Album Profile!)
+            if (results.albums.isNotEmpty()) {
+                item(key = "sr_albums") {
+                    SearchCollectionRow(
+                        title = "Album",
+                        items = results.albums,
+                        onOpen = onOpenCollection
+                    )
+                }
+            }
+
+            // Playlists Carousel (Clickable -> Full Playlist Profile!)
+            if (results.playlists.isNotEmpty()) {
+                item(key = "sr_playlists") {
+                    SearchCollectionRow(
+                        title = "Playlist",
+                        items = results.playlists,
+                        onOpen = onOpenCollection
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchCollectionRow(
+    title: String,
+    items: List<CollectionSummary>,
+    onOpen: (CollectionSummary) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(
+            text = title,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.ExtraBold,
+            color = SpotyColors.Slate900,
+            modifier = Modifier.padding(horizontal = SpotySpacing.ScreenHorizontal)
+        )
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = SpotySpacing.ScreenHorizontal),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(items, key = { it.browseId }) { col ->
+                SpotyGlassCard(
+                    modifier = Modifier.width(146.dp),
+                    shape = RoundedCornerShape(22.dp),
+                    tintAlpha = 0.64f,
+                    onClick = { onOpen(col) }
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        SpotyArtwork(
+                            coverUrl = col.coverUrl,
+                            accentColor = SpotyColors.EmeraldCrystal,
+                            size = 126.dp,
+                            cornerRadius = 16.dp
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = col.title,
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = SpotyColors.Slate900,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = col.subtitle.ifBlank { col.year },
+                            fontSize = 11.5.sp,
+                            color = SpotyColors.Slate500,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
             }

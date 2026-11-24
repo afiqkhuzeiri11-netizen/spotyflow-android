@@ -14,8 +14,8 @@ android {
         applicationId = "com.netease.cloudmusic"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0-native"
+        versionCode = 2
+        versionName = "1.1.0-native"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -34,6 +34,7 @@ android {
     }
 
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -56,6 +57,8 @@ kotlin {
 }
 
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
+
     implementation(platform("androidx.compose:compose-bom:2025.05.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
@@ -70,4 +73,18 @@ dependencies {
 
     implementation("dev.chrisbanes.haze:haze:1.6.10")
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("androidx.palette:palette-ktx:1.0.0")
+
+    // Media3 ExoPlayer + Background MediaSession + Local Cache + Video UI
+    implementation("androidx.media3:media3-exoplayer:1.6.1")
+    implementation("androidx.media3:media3-session:1.6.1")
+    implementation("androidx.media3:media3-common:1.6.1")
+    implementation("androidx.media3:media3-datasource:1.6.1")
+    implementation("androidx.media3:media3-database:1.6.1")
+    implementation("androidx.media3:media3-ui:1.6.1")
+
+    // Fast On-Device Streaming & Fallback Extraction
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.github.teamnewpipe:NewPipeExtractor:v0.26.0")
+    implementation("com.google.guava:guava:33.3.1-android")
 }
