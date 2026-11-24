@@ -49,14 +49,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-apk
-          name: SpotyFlow Native v2.4.0
+          name: SpotyFlow Native v2.5.0
           body: |
-            SpotyFlow 100% Native Android (v2.4.0-native, Build 8) — YouTube Music Search, Artist Banner HD, Full Album & Track Credits!
-            - Live Typing Search Overlay ala YouTube/YouTube Music (Dual-Engine Autocomplete < 200ms + History + Bold Keyword Suggestions + Instant Song/Album/Artist Cards)
-            - Super-Complete Search Results (Hero Top Result, 20-100+ Songs, Albums, Artists, Videos, Playlists, Infinite Scroll & Deezer Rescue with 100% Full YouTube/ExoPlayer Playback)
-            - 100% Guaranteed HD Artist Banner (YTM all-headers + TheAudioDB Fanart + Deezer XL + Country/Debut/Genre/Bio)
-            - Full Album Detail (100% MPREb_ extraction, numbered tracklist, Release Date, Label, Copyright & Download Album)
-            - Official Track Credits & Info Sheet (Performers, Composers, Producers, Label, Copyright, Release Date, Genre, BPM, Duration & Active Stream Quality)
+            SpotyFlow 100% Native Android (v2.5.0-native, Build 9) — Rombak Total Poster Lagu Depth Effect 4-Layer!
+            - Strict 4-Layer Behind-Object Depth Stack: 100% SEMUA sampul lagu (1-5 lagu) + teks besar dikunci di Layer 2 DI BELAKANG potongan objek transparan 1:1 (Layer 3)
+            - 3-Lapis AI Pemisah Objek Anti-Gagal: Google ML Kit Subject Segmentation (auto-download modul), ML Kit Selfie Segmentation Offline, + slot opsional Clipdrop API Key
+            - Matte Edge Refinement 4-Tahap (anti-gerigi, anti-bercak, anti-tembus badan, EXIF-safe upright photo, Cek Potongan checkerboard)
+            - Kartu Mini-Player Liquid Glass murni di Layer 4 tanpa thumbnail sampul depan (hanya judul, artis, progress bar adaptif, & ikon Play)
+            - Ekspor True 1080x1920 Full HD PNG anti-pecah langsung ke Pictures/SpotyFlow
           files: SpotyFlow.apk
           make_latest: true
         env:
