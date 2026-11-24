@@ -348,11 +348,11 @@ fun Poster3DStudioScreen(
             val photo = SpotyFlowDepthEngine.loadUprightPhoto(context, uri, maxSide = 1600)
             if (photo != null) {
                 uprightPhoto = photo
-                val seg = SpotyFlowDepthEngine.segmentSubject(photo)
+                val seg = SpotyFlowDepthEngine.segmentSubject(context, photo)
                 depthResult = seg
                 config = config.copy(depthEnabled = seg.hasSubject)
                 onShowToast(
-                    if (seg.hasSubject) "Objek dipotong + Cahaya Tepi aktif otomatis"
+                    if (seg.hasSubject) "Objek dipotong rapi (${seg.engineLabel}) + Cahaya Tepi aktif"
                     else "Foto dipasang (gunakan Kuas jika ingin memotong objek)"
                 )
             } else {
