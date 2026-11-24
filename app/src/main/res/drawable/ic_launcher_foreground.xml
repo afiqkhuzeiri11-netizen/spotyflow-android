@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Soft Glass Halo -->
+    <path
+        android:fillColor="#26FFFFFF"
+        android:pathData="M54,24A30,30 0 1,0 54,84A30,30 0 1,0 54,24Z" />
+
+    <!-- Crisp White Soundwave + Music Flow Mark -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M35,51C35,48.8 36.8,47 39,47C41.2,47 43,48.8 43,51V63C43,65.2 41.2,67 39,67C36.8,67 35,65.2 35,63V51Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M49,39C49,36.8 50.8,35 53,35C55.2,35 57,36.8 57,39V69C57,71.2 55.2,73 53,73C50.8,73 49,71.2 49,69V39Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M63,45C63,42.8 64.8,41 67,41C69.2,41 71,42.8 71,45V61C71,63.2 69.2,65 67,65C64.8,65 63,63.2 63,61V45Z" />
+</vector>
