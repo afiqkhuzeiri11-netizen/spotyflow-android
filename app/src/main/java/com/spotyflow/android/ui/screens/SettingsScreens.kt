@@ -93,7 +93,7 @@ enum class SettingsCategory(val title: String, val subtitle: String, val icon: I
     BACKUP("Cadangan dan impor", "Ekspor/Impor .json & Impor Playlist Spotify/YTM", Icons.Rounded.Backup),
     ANDROID_AUTO("Android Auto", "Prioritas Offline & Kontrol Suara di Mobil", Icons.Rounded.DirectionsCar),
     LINKS("Tautan", "Situs Resmi SpotyFlow, Rilis APK & Bantuan", Icons.Rounded.Link),
-    ABOUT("Tentang SpotyFlow", "v2.0.0-native (Build 4) • Media3 + Haze + ML Kit", Icons.Rounded.Info)
+    ABOUT("Tentang SpotyFlow", "v2.4.0-native (Build 8) • Media3 + Haze + ML Kit", Icons.Rounded.Info)
 }
 
 @Composable
@@ -709,10 +709,10 @@ private fun LinksSettingsPage(onShowToast: (String) -> Unit) {
 @Composable
 private fun AboutSettingsPage() {
     Column(modifier = Modifier.padding(horizontal = SpotySpacing.ScreenHorizontal), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        SettingsCard("SpotyFlow Native v2.0.0-native") {
-            Text("Build 4 • 100% Native Kotlin + Jetpack Compose 120 FPS", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = SpotyColors.Slate900)
+        SettingsCard("SpotyFlow Native v2.4.0-native") {
+            Text("Build 8 • 100% Native Kotlin + Jetpack Compose 120 FPS", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = SpotyColors.Slate900)
             Text(
-                text = "• Pure White x Full Liquid Glass (Haze 1.6.10) + Real Water Drops AGSL\n• Streaming Cepat On-Device (InnerTube ANDROID_VR + NewPipe v0.26.0)\n• Media3 ExoPlayer 1.6.1 + Hardware 5-Band EQ + Offline M4A\n• Custom Dynamic Island Pro via AccessibilityService (6 Gaya + Lirik Live)\n• Poster Lagu 3D Depth Effect (Offline ML Kit Selfie Segmentation)\n• 5 Ukuran Widget Layar Utama Native (1x1 s.d. 4x2)",
+                text = "• Pure White x Full Liquid Glass (Haze 1.6.10) + Real Water Drops AGSL\n• Mesin Pencari Live ala YouTube Music (< 200ms Autocomplete + Infinite Scroll)\n• Banner Artis HD (YTM + TheAudioDB + Deezer), Full Album & Kredit Lagu Resmi\n• Streaming Cepat On-Device (InnerTube + NewPipe + Media3 ExoPlayer 1.6.1)\n• Custom Dynamic Island Pro via AccessibilityService (6 Gaya + Lirik Live)\n• Poster Lagu 3D Pro (Rim Light, Teks 3D, B&W Color-Pop, 2-Finger Pinch & 5 Preset)\n• 5 Ukuran Widget Layar Utama Native (1x1 s.d. 4x2)",
                 fontSize = 12.sp,
                 color = SpotyColors.Slate700,
                 lineHeight = 18.sp

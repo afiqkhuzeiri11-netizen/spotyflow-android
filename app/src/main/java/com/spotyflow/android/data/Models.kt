@@ -69,11 +69,61 @@ data class CollectionSummary(
     val isAlbum: Boolean = true
 )
 
+enum class QuickSuggestionType {
+    SONG,
+    ALBUM,
+    ARTIST,
+    PLAYLIST,
+    VIDEO
+}
+
+data class QuickSearchEntity(
+    val type: QuickSuggestionType,
+    val id: String,
+    val title: String,
+    val subtitle: String,
+    val coverUrl: String,
+    val trackItem: TrackItem? = null,
+    val artistBrowseId: String? = null,
+    val albumBrowseId: String? = null
+)
+
+data class SearchSuggestionsResult(
+    val query: String = "",
+    val textSuggestions: List<String> = emptyList(),
+    val quickEntities: List<QuickSearchEntity> = emptyList()
+)
+
+data class TrackCreditsData(
+    val videoId: String = "",
+    val title: String = "",
+    val artist: String = "",
+    val artistBrowseId: String = "",
+    val album: String = "",
+    val albumBrowseId: String = "",
+    val coverUrl: String = "",
+    val performers: List<String> = emptyList(),
+    val composers: List<String> = emptyList(),
+    val lyricists: List<String> = emptyList(),
+    val producers: List<String> = emptyList(),
+    val recordLabel: String = "",
+    val copyright: String = "",
+    val releaseDate: String = "",
+    val genre: String = "",
+    val bpm: Int = 0,
+    val durationSec: Int = 0,
+    val streamQualityLabel: String = "AAC / Opus High • ExoPlayer",
+    val sourceName: String = "YouTube Music"
+)
+
 data class ArtistProfileData(
     val browseId: String,
     val name: String,
     val subscribersText: String = "",
     val monthlyListenersText: String = "",
+    val country: String = "",
+    val debutYear: String = "",
+    val genre: String = "",
     val bannerUrl: String = "",
     val avatarUrl: String = "",
     val description: String = "",
@@ -90,6 +140,10 @@ data class CollectionDetailData(
     val artistName: String = "",
     val artistBrowseId: String = "",
     val year: String = "",
+    val releaseDate: String = "",
+    val recordLabel: String = "",
+    val copyright: String = "",
+    val genre: String = "",
     val description: String = "",
     val coverUrl: String = "",
     val totalDurationText: String = "",
@@ -101,13 +155,19 @@ data class CollectionDetailData(
 data class SearchResults(
     val topResult: TrackItem? = null,
     val topArtist: ArtistSummary? = null,
+    val topAlbum: CollectionSummary? = null,
     val tracks: List<TrackItem> = emptyList(),
+    val videos: List<TrackItem> = emptyList(),
     val artists: List<ArtistSummary> = emptyList(),
     val albums: List<CollectionSummary> = emptyList(),
-    val playlists: List<CollectionSummary> = emptyList()
+    val playlists: List<CollectionSummary> = emptyList(),
+    val continuationToken: String? = null
 ) {
     val isEmpty: Boolean
-        get() = tracks.isEmpty() && artists.isEmpty() && albums.isEmpty() && playlists.isEmpty()
+        get() = tracks.isEmpty() && videos.isEmpty() && artists.isEmpty() && albums.isEmpty() && playlists.isEmpty()
+
+    val hasMore: Boolean
+        get() = !continuationToken.isNullOrBlank()
 }
 
 data class UserProfile(

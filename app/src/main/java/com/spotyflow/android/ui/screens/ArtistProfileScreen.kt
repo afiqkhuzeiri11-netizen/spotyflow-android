@@ -64,6 +64,7 @@ import com.spotyflow.android.ui.glass.SpotyArtwork
 import com.spotyflow.android.ui.glass.SpotyGlassCard
 import com.spotyflow.android.ui.glass.SpotyGlassCircleButton
 import com.spotyflow.android.ui.glass.SpotyMiniEqBars
+import com.spotyflow.android.ui.theme.LocalSpotyAppearance
 import com.spotyflow.android.ui.theme.SpotyColors
 import com.spotyflow.android.ui.theme.SpotySpacing
 
@@ -87,6 +88,11 @@ fun ArtistProfileScreen(
     BackHandler(enabled = true) { onBack() }
 
     val context = LocalContext.current
+    val app = LocalSpotyAppearance.current
+    val ink = app.textPrimary
+    val sub = app.textSecondary
+    val accent = app.accent
+    val canvasBg = app.canvasBackground
     var bioExpanded by remember { mutableStateOf(false) }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -129,19 +135,19 @@ fun ArtistProfileScreen(
                 contentPadding = PaddingValues(bottom = SpotySpacing.BottomScrollClearance),
                 verticalArrangement = Arrangement.spacedBy(SpotySpacing.SectionGap)
             ) {
-                // 1. Hero Artist Banner fading smoothly into Pure White + Glass Avatar + Actions
+                // 1. Hero Artist HD Banner fading smoothly into active theme canvas + Glass Avatar + Metadata + Actions
                 item(key = "artist_hero") {
                     Box(modifier = Modifier.fillMaxWidth()) {
-                        // Full-width HD Banner
+                        // Full-width HD Banner (268.dp)
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(250.dp)
+                                .height(268.dp)
                                 .background(
                                     Brush.verticalGradient(
                                         colors = listOf(
-                                            SpotyColors.DefaultMintMist,
-                                            SpotyColors.PureWhiteCanvas
+                                            accent.copy(alpha = if (app.isDark) 0.36f else 0.24f),
+                                            canvasBg
                                         )
                                     )
                                 )
@@ -157,16 +163,16 @@ fun ArtistProfileScreen(
                                     modifier = Modifier.fillMaxSize()
                                 )
                             }
-                            // Seamless white melt gradient into Pure White canvas
+                            // Seamless theme-aware melt gradient into active canvas (Pure White / Dark / AMOLED)
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .background(
                                         Brush.verticalGradient(
                                             colors = listOf(
-                                                Color.White.copy(alpha = 0.14f),
-                                                Color.White.copy(alpha = 0.45f),
-                                                SpotyColors.PureWhiteCanvas
+                                                canvasBg.copy(alpha = if (app.isDark) 0.16f else 0.08f),
+                                                canvasBg.copy(alpha = if (app.isDark) 0.56f else 0.44f),
+                                                canvasBg
                                             )
                                         )
                                     )
@@ -177,7 +183,7 @@ fun ArtistProfileScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .statusBarsPadding()
-                                .padding(top = 64.dp, start = 20.dp, end = 20.dp),
+                                .padding(top = 72.dp, start = 20.dp, end = 20.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             // Crystal Glass Framed Circular Avatar
@@ -190,8 +196,8 @@ fun ArtistProfileScreen(
                                         ambientColor = Color(0x220F172A)
                                     )
                                     .clip(CircleShape)
-                                    .background(Color.White)
-                                    .border(3.dp, Color.White, CircleShape),
+                                    .background(if (app.isDark) Color(0xFF1A1E2A) else Color.White)
+                                    .border(3.dp, if (app.isDark) Color.White.copy(alpha = 0.25f) else Color.White, CircleShape),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
@@ -220,18 +226,58 @@ fun ArtistProfileScreen(
                                 fontSize = 28.sp,
                                 lineHeight = 32.sp,
                                 fontWeight = FontWeight.ExtraBold,
-                                color = SpotyColors.Slate900,
+                                color = ink,
                                 textAlign = TextAlign.Center
                             )
 
-                            if (profile.subscribersText.isNotBlank()) {
+                            val metaSub = listOf(
+                                profile.subscribersText,
+                                profile.monthlyListenersText.takeIf { it != profile.subscribersText }.orEmpty()
+                            ).filter { it.isNotBlank() }.joinToString(" • ")
+
+                            if (metaSub.isNotBlank()) {
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = profile.subscribersText,
+                                    text = metaSub,
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Medium,
-                                    color = SpotyColors.Slate500
+                                    color = sub,
+                                    textAlign = TextAlign.Center
                                 )
+                            }
+
+                            // Country, Debut Year & Genre pills (enriched from TheAudioDB / Deezer)
+                            val badges = buildList {
+                                if (profile.country.isNotBlank()) add(profile.country)
+                                if (profile.debutYear.isNotBlank()) add("Debut ${profile.debutYear}")
+                                if (profile.genre.isNotBlank()) add(profile.genre)
+                            }
+                            if (badges.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    badges.forEach { badge ->
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(999.dp))
+                                                .background(
+                                                    if (app.isDark) Color.White.copy(alpha = 0.10f)
+                                                    else SpotyColors.Slate900.copy(alpha = 0.06f)
+                                                )
+                                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                                        ) {
+                                            Text(
+                                                text = badge,
+                                                fontSize = 11.5.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = sub,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
+                                }
                             }
 
                             Spacer(modifier = Modifier.height(16.dp))

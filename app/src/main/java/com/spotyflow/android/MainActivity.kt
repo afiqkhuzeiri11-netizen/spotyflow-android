@@ -52,6 +52,7 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlaylistAdd
 import androidx.compose.material.icons.rounded.QueuePlayNext
@@ -95,6 +96,7 @@ import com.spotyflow.android.poster.Poster3DStudioScreen
 import com.spotyflow.android.ui.components.SpotyLiquidDock
 import com.spotyflow.android.ui.components.SpotyMiniPlayer
 import com.spotyflow.android.ui.components.SpotyNowPlayingSheet
+import com.spotyflow.android.ui.components.TrackCreditsSheet
 import com.spotyflow.android.ui.glass.LocalBgHazeState
 import com.spotyflow.android.ui.glass.LocalContentHazeState
 import com.spotyflow.android.ui.glass.PureWhiteAmbientCanvas
@@ -285,6 +287,7 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
                             onPlayAll = { tracks, shuf -> vm.playQueue(tracks, 0, shuf) },
                             onPlayTrack = vm::playTrack,
                             onToggleSave = vm::toggleSaveCollection,
+                            onDownloadAll = vm::downloadTracksBatch,
                             onOpenArtist = { bId, name -> vm.openArtistProfile(bId, name) },
                             onOpenTrackMenu = vm::openTrackMenu
                         )
@@ -366,9 +369,11 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
                                 uiState = uiState,
                                 topHeaderClearance = topHeaderClearance,
                                 onQueryChange = vm::updateSearchQuery,
+                                onFillQuery = vm::fillSearchQueryWithoutSubmit,
                                 onSubmitQuery = vm::submitSearchQuery,
                                 onRemoveHistory = vm::removeSearchHistory,
                                 onSelectFilter = vm::selectSearchFilter,
+                                onLoadMore = vm::loadMoreSearchResults,
                                 onPlayTrack = vm::playTrack,
                                 onOpenArtist = { a -> vm.openArtistProfile(a.browseId, a.name) },
                                 onOpenCollection = { c -> vm.openCollectionDetail(c.browseId, c.title) },
@@ -543,12 +548,10 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
                             vm.openArtistProfile(track.artistBrowseId, track.artist)
                         },
                         onOpenAlbum = {
-                            if (track.albumBrowseId.isNotBlank()) {
-                                vm.openCollectionDetail(track.albumBrowseId, track.album)
-                            } else {
-                                vm.showToast("Detail album tidak tersedia untuk lagu ini")
-                                vm.closeTrackMenu()
-                            }
+                            vm.openAlbumForTrack(track)
+                        },
+                        onOpenCredits = {
+                            vm.openTrackCredits(track)
                         },
                         onStartRadio = {
                             vm.closeTrackMenu()
@@ -578,6 +581,27 @@ fun SpotyFlowApp(vm: SpotyViewModel = viewModel()) {
                             } catch (_: Throwable) {
                                 // Ignore
                             }
+                        }
+                    )
+                }
+            }
+
+            // Official Track Credits & Info Sheet
+            AnimatedVisibility(
+                visible = uiState.creditsTrack != null,
+                enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
+                exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 })
+            ) {
+                uiState.creditsTrack?.let { cTrack ->
+                    TrackCreditsSheet(
+                        track = cTrack,
+                        credits = uiState.loadedTrackCredits,
+                        isLoading = uiState.isCreditsLoading,
+                        onDismiss = vm::closeTrackCredits,
+                        onOpenAlbum = { t -> vm.openAlbumForTrack(t) },
+                        onOpenArtist = { bId, name ->
+                            vm.closeTrackCredits()
+                            vm.openArtistProfile(bId, name)
                         }
                     )
                 }
@@ -857,6 +881,7 @@ private fun TrackMenuGlassSheet(
     onToggleLike: () -> Unit,
     onOpenArtist: () -> Unit,
     onOpenAlbum: () -> Unit,
+    onOpenCredits: () -> Unit,
     onStartRadio: () -> Unit,
     onDownloadOffline: () -> Unit,
     onOpenPoster3D: () -> Unit,
@@ -947,9 +972,12 @@ private fun TrackMenuGlassSheet(
                     onToggleLike
                 )
                 MenuSheetActionRow(Icons.Rounded.Person, "Lihat Profil Artis", onOpenArtist)
-                if (track.albumBrowseId.isNotBlank()) {
-                    MenuSheetActionRow(Icons.Rounded.Album, "Lihat Album", onOpenAlbum)
-                }
+                MenuSheetActionRow(
+                    Icons.Rounded.Album,
+                    if (track.album.isNotBlank()) "Lihat Album (${track.album})" else "Lihat Album",
+                    onOpenAlbum
+                )
+                MenuSheetActionRow(Icons.Rounded.Info, "Kredit & Info Lagu", onOpenCredits)
                 MenuSheetActionRow(Icons.Rounded.Radio, "Mulai Radio Lagu Ini", onStartRadio)
                 MenuSheetActionRow(Icons.Rounded.Download, "Unduh Offline (M4A)", onDownloadOffline)
                 MenuSheetActionRow(Icons.Rounded.AutoAwesome, "Buat Poster Lagu 3D", onOpenPoster3D)

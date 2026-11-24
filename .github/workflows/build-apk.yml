@@ -49,16 +49,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-apk
-          name: SpotyFlow Native v2.1.0
+          name: SpotyFlow Native v2.4.0
           body: |
-            SpotyFlow 100% Native Android (v2.1.0-native, Build 5) — Poster Lagu 3D Pro Upgrade!
-            - Upgrade #1: True Colored Inner Rim Light hugging subject hair, face & shoulders
-            - Upgrade #2: Giant Depth Typography behind head (3 fonts + 1-tap lyric line picker)
-            - Upgrade #3: Per-card 5-layer Front/Back subject depth layering
-            - Upgrade #4: 6 Cinematic Photo Color Filters including viral B&W Color-Pop
-            - Upgrade #5: 2-Finger Pinch-to-Zoom & Rotate + 1-Finger Drag on Live Preview
-            - Upgrade #6: 5 1-Tap Pro Presets (Mirror Selfie 3D, Color-Pop B&W, Sampul Majalah, Kolase 4 Lagu, Pure White Crystal)
-            - Upgrade #7: 4-Layer Optical Glass Water Drops on 3D Music Cards
+            SpotyFlow 100% Native Android (v2.4.0-native, Build 8) — YouTube Music Search, Artist Banner HD, Full Album & Track Credits!
+            - Live Typing Search Overlay ala YouTube/YouTube Music (Dual-Engine Autocomplete < 200ms + History + Bold Keyword Suggestions + Instant Song/Album/Artist Cards)
+            - Super-Complete Search Results (Hero Top Result, 20-100+ Songs, Albums, Artists, Videos, Playlists, Infinite Scroll & Deezer Rescue with 100% Full YouTube/ExoPlayer Playback)
+            - 100% Guaranteed HD Artist Banner (YTM all-headers + TheAudioDB Fanart + Deezer XL + Country/Debut/Genre/Bio)
+            - Full Album Detail (100% MPREb_ extraction, numbered tracklist, Release Date, Label, Copyright & Download Album)
+            - Official Track Credits & Info Sheet (Performers, Composers, Producers, Label, Copyright, Release Date, Genre, BPM, Duration & Active Stream Quality)
           files: SpotyFlow.apk
           make_latest: true
         env:

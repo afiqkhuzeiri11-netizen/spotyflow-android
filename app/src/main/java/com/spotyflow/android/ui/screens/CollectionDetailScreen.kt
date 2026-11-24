@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowBackIosNew
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.MoreVert
@@ -49,6 +50,7 @@ import com.spotyflow.android.ui.glass.SpotyArtwork
 import com.spotyflow.android.ui.glass.SpotyGlassCard
 import com.spotyflow.android.ui.glass.SpotyGlassCircleButton
 import com.spotyflow.android.ui.glass.SpotyMiniEqBars
+import com.spotyflow.android.ui.theme.LocalSpotyAppearance
 import com.spotyflow.android.ui.theme.SpotyColors
 import com.spotyflow.android.ui.theme.SpotySpacing
 
@@ -64,11 +66,16 @@ fun CollectionDetailScreen(
     onPlayAll: (List<TrackItem>, Boolean) -> Unit,
     onPlayTrack: (TrackItem, List<TrackItem>) -> Unit,
     onToggleSave: (CollectionSummary) -> Unit,
+    onDownloadAll: (List<TrackItem>) -> Unit,
     onOpenArtist: (String, String) -> Unit,
     onOpenTrackMenu: (TrackItem) -> Unit,
     modifier: Modifier = Modifier
 ) {
     BackHandler(enabled = true) { onBack() }
+    val app = LocalSpotyAppearance.current
+    val ink = app.textPrimary
+    val sub = app.textSecondary
+    val accent = app.accent
 
     Box(modifier = modifier.fillMaxSize()) {
         if (isLoading && detail == null) {
@@ -144,7 +151,7 @@ fun CollectionDetailScreen(
                                 fontSize = 22.sp,
                                 lineHeight = 27.sp,
                                 fontWeight = FontWeight.ExtraBold,
-                                color = SpotyColors.Slate900,
+                                color = ink,
                                 textAlign = TextAlign.Center
                             )
 
@@ -154,7 +161,7 @@ fun CollectionDetailScreen(
                                     text = detail.artistName,
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = SpotyColors.DeepEmerald,
+                                    color = accent,
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(8.dp))
                                         .clickable { onOpenArtist(detail.artistBrowseId, detail.artistName) }
@@ -171,13 +178,28 @@ fun CollectionDetailScreen(
                                     if (detail.totalDurationText.isNotBlank()) append(" • ${detail.totalDurationText}")
                                 },
                                 fontSize = 12.5.sp,
-                                color = SpotyColors.Slate500
+                                color = sub
                             )
+
+                            if (detail.recordLabel.isNotBlank() || detail.genre.isNotBlank()) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = listOf(detail.genre, detail.recordLabel)
+                                        .filter { it.isNotBlank() }
+                                        .joinToString(" • "),
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = sub,
+                                    textAlign = TextAlign.Center,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
 
                             Spacer(modifier = Modifier.height(16.dp))
 
                             Row(
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(9.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Box(
@@ -185,14 +207,14 @@ fun CollectionDetailScreen(
                                         .shadow(
                                             elevation = 10.dp,
                                             shape = RoundedCornerShape(999.dp),
-                                            ambientColor = SpotyColors.EmeraldCrystal.copy(alpha = 0.35f)
+                                            ambientColor = accent.copy(alpha = 0.35f)
                                         )
                                         .clip(RoundedCornerShape(999.dp))
-                                        .background(SpotyColors.EmeraldCrystal)
+                                        .background(accent)
                                         .clickable {
                                             if (detail.tracks.isNotEmpty()) onPlayAll(detail.tracks, false)
                                         }
-                                        .padding(horizontal = 18.dp, vertical = 11.dp)
+                                        .padding(horizontal = 16.dp, vertical = 11.dp)
                                 ) {
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
@@ -229,19 +251,19 @@ fun CollectionDetailScreen(
                                         Icon(
                                             imageVector = Icons.Rounded.Shuffle,
                                             contentDescription = "Acak",
-                                            tint = SpotyColors.Slate900,
+                                            tint = ink,
                                             modifier = Modifier.size(16.dp)
                                         )
                                         Text(
                                             text = "Acak",
                                             fontSize = 13.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = SpotyColors.Slate900
+                                            color = ink
                                         )
                                     }
                                 }
 
-                                if (!detail.isCustomPlaylist && (detail.browseId.startsWith("MPREb_") || detail.browseId.startsWith("VL"))) {
+                                if (!detail.isCustomPlaylist && (detail.browseId.startsWith("MPREb_") || detail.browseId.startsWith("VL") || detail.browseId.startsWith("deezer_album:"))) {
                                     SpotyGlassCircleButton(
                                         onClick = {
                                             onToggleSave(
@@ -261,7 +283,22 @@ fun CollectionDetailScreen(
                                         Icon(
                                             imageVector = if (isSaved) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
                                             contentDescription = "Simpan",
-                                            tint = if (isSaved) SpotyColors.HeartRed else SpotyColors.Slate900,
+                                            tint = if (isSaved) SpotyColors.HeartRed else ink,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+
+                                if (detail.tracks.isNotEmpty()) {
+                                    SpotyGlassCircleButton(
+                                        onClick = { onDownloadAll(detail.tracks) },
+                                        size = 42.dp,
+                                        useFloatingLayer = false
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Download,
+                                            contentDescription = "Unduh Album",
+                                            tint = ink,
                                             modifier = Modifier.size(20.dp)
                                         )
                                     }
@@ -329,14 +366,14 @@ fun CollectionDetailScreen(
                                                     text = track.title,
                                                     fontSize = 14.sp,
                                                     fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.SemiBold,
-                                                    color = if (isActive) SpotyColors.DeepEmerald else SpotyColors.Slate900,
+                                                    color = if (isActive) accent else ink,
                                                     maxLines = 1,
                                                     overflow = TextOverflow.Ellipsis
                                                 )
                                                 Text(
                                                     text = track.artist,
                                                     fontSize = 12.sp,
-                                                    color = SpotyColors.Slate500,
+                                                    color = sub,
                                                     maxLines = 1,
                                                     overflow = TextOverflow.Ellipsis
                                                 )
@@ -348,7 +385,7 @@ fun CollectionDetailScreen(
                                                 Text(
                                                     text = formatDuration(track.durationSec),
                                                     fontSize = 12.sp,
-                                                    color = SpotyColors.Slate500
+                                                    color = sub
                                                 )
                                             }
                                             IconButton(
@@ -358,7 +395,7 @@ fun CollectionDetailScreen(
                                                 Icon(
                                                     imageVector = Icons.Rounded.MoreVert,
                                                     contentDescription = "Opsi",
-                                                    tint = SpotyColors.Slate500,
+                                                    tint = sub,
                                                     modifier = Modifier.size(18.dp)
                                                 )
                                             }
@@ -367,11 +404,45 @@ fun CollectionDetailScreen(
                                             HorizontalDivider(
                                                 modifier = Modifier.padding(start = 74.dp, end = 16.dp),
                                                 thickness = 0.5.dp,
-                                                color = SpotyColors.HairlineDivider
+                                                color = if (app.isDark) Color.White.copy(alpha = 0.08f) else SpotyColors.HairlineDivider
                                             )
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+
+                // Album Metadata Footer (Release Date, Label & Copyright)
+                if (detail.releaseDate.isNotBlank() || detail.copyright.isNotBlank() || detail.recordLabel.isNotBlank()) {
+                    item(key = "col_footer") {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = SpotySpacing.ScreenHorizontal + 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            if (detail.releaseDate.isNotBlank()) {
+                                Text(
+                                    text = "Dirilis ${detail.releaseDate}",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = sub
+                                )
+                            }
+                            if (detail.copyright.isNotBlank()) {
+                                Text(
+                                    text = detail.copyright,
+                                    fontSize = 11.5.sp,
+                                    color = sub
+                                )
+                            } else if (detail.recordLabel.isNotBlank()) {
+                                Text(
+                                    text = detail.recordLabel,
+                                    fontSize = 11.5.sp,
+                                    color = sub
+                                )
                             }
                         }
                     }

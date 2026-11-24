@@ -60,8 +60,12 @@ data class PlayerUiState(
     val isManualLyricsOpen: Boolean = false,
     val searchQuery: String = "",
     val searchFilter: SearchFilter = SearchFilter.ALL,
+    val hasSubmittedSearch: Boolean = false,
+    val searchSuggestions: SearchSuggestionsResult = SearchSuggestionsResult(),
+    val isSuggestionsLoading: Boolean = false,
     val searchResults: SearchResults = SearchResults(),
     val isSearching: Boolean = false,
+    val isLoadingMoreSearch: Boolean = false,
     val searchHistory: List<String> = emptyList(),
     val userProfile: UserProfile = UserProfile(),
     val likedTracks: List<TrackItem> = emptyList(),
@@ -82,6 +86,9 @@ data class PlayerUiState(
     val loadedCollection: CollectionDetailData? = null,
     val isCollectionLoading: Boolean = false,
     val menuTrack: TrackItem? = null,
+    val creditsTrack: TrackItem? = null,
+    val loadedTrackCredits: TrackCreditsData? = null,
+    val isCreditsLoading: Boolean = false,
     val activePreviewSheet: PreviewSheetData? = null,
     val toastMessage: String? = null
 ) {
@@ -119,6 +126,9 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
 
     private var searchJob: Job? = null
+    private var suggestionsJob: Job? = null
+    private var loadMoreJob: Job? = null
+    private var creditsJob: Job? = null
     private var lyricsJob: Job? = null
     private var translateJob: Job? = null
     private var paletteJob: Job? = null
@@ -343,10 +353,41 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
     // REAL MEDIA3 PLAYBACK CONTROLS
     // =========================================================================
     fun playTrack(track: TrackItem, queue: List<TrackItem> = emptyList()) {
+        // Resolve rescued metadata-only track to full YouTube videoId (0% 30-second previews!)
+        if (track.videoId.length != 11 && track.localUri.isBlank()) {
+            _uiState.update {
+                it.copy(
+                    currentTrack = track,
+                    isPlaying = true,
+                    isBuffering = true,
+                    positionMs = 0L,
+                    durationMs = track.durationSec * 1000L
+                )
+            }
+            viewModelScope.launch {
+                val resolved = InnerTubeMusicClient.resolveFullTrack(track)
+                if (resolved.videoId.length != 11) {
+                    _uiState.update { it.copy(isPlaying = false, isBuffering = false) }
+                    showToast("Audio penuh tidak ditemukan untuk \"${track.title}\"")
+                    return@launch
+                }
+                val updatedQueue = if (queue.isNotEmpty()) {
+                    queue.map { if (it.id == track.id) resolved else it }
+                } else {
+                    listOf(resolved) + _uiState.value.homeTracks.filter { it.id != resolved.id }.take(15)
+                }
+                playResolvedQueue(resolved, updatedQueue)
+            }
+            return
+        }
         val list = if (queue.isNotEmpty()) queue else {
             val pool = _uiState.value.homeTracks
             if (pool.any { it.id == track.id }) pool else listOf(track) + pool.take(15)
         }
+        playResolvedQueue(track, list)
+    }
+
+    private fun playResolvedQueue(track: TrackItem, list: List<TrackItem>) {
         val startIdx = list.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
         _uiState.update {
             it.copy(
@@ -541,26 +582,62 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // =========================================================================
-    // LIVE SEARCH
+    // LIVE TYPING AUTOCOMPLETE (180ms) + SUPER-COMPLETE SEARCH + INFINITE SCROLL
     // =========================================================================
     fun updateSearchQuery(query: String) {
-        _uiState.update { it.copy(searchQuery = query) }
+        _uiState.update {
+            it.copy(
+                searchQuery = query,
+                hasSubmittedSearch = false
+            )
+        }
+        suggestionsJob?.cancel()
         searchJob?.cancel()
-        if (query.isBlank()) {
-            _uiState.update { it.copy(searchResults = SearchResults(), isSearching = false) }
+        loadMoreJob?.cancel()
+
+        val clean = query.trim()
+        if (clean.isEmpty()) {
+            _uiState.update {
+                it.copy(
+                    searchSuggestions = SearchSuggestionsResult(),
+                    isSuggestionsLoading = false,
+                    searchResults = SearchResults(),
+                    isSearching = false,
+                    isLoadingMoreSearch = false
+                )
+            }
             return
         }
-        searchJob = viewModelScope.launch {
-            delay(360L)
-            executeSearch(query, _uiState.value.searchFilter, saveHistory = false)
+
+        suggestionsJob = viewModelScope.launch {
+            _uiState.update { it.copy(isSuggestionsLoading = true) }
+            delay(180L)
+            val res = InnerTubeMusicClient.fetchSearchSuggestions(clean)
+            if (_uiState.value.searchQuery.trim().equals(clean, ignoreCase = true) && !_uiState.value.hasSubmittedSearch) {
+                _uiState.update { it.copy(searchSuggestions = res, isSuggestionsLoading = false) }
+            }
         }
+    }
+
+    fun fillSearchQueryWithoutSubmit(text: String) {
+        val next = text.trim()
+        if (next.isEmpty()) return
+        updateSearchQuery("$next ")
     }
 
     fun submitSearchQuery(query: String) {
         val clean = query.trim()
-        _uiState.update { it.copy(searchQuery = clean) }
+        _uiState.update {
+            it.copy(
+                searchQuery = clean,
+                hasSubmittedSearch = clean.isNotEmpty(),
+                isSuggestionsLoading = false
+            )
+        }
         if (clean.isEmpty()) return
+        suggestionsJob?.cancel()
         searchJob?.cancel()
+        loadMoreJob?.cancel()
         searchJob = viewModelScope.launch {
             executeSearch(clean, _uiState.value.searchFilter, saveHistory = true)
         }
@@ -569,8 +646,9 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
     fun selectSearchFilter(filter: SearchFilter) {
         _uiState.update { it.copy(searchFilter = filter) }
         val q = _uiState.value.searchQuery.trim()
-        if (q.isNotEmpty()) {
+        if (q.isNotEmpty() && _uiState.value.hasSubmittedSearch) {
             searchJob?.cancel()
+            loadMoreJob?.cancel()
             searchJob = viewModelScope.launch {
                 executeSearch(q, filter, saveHistory = false)
             }
@@ -578,7 +656,7 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun executeSearch(query: String, filter: SearchFilter, saveHistory: Boolean) {
-        _uiState.update { it.copy(isSearching = true) }
+        _uiState.update { it.copy(isSearching = true, isLoadingMoreSearch = false) }
         val s = _uiState.value.appSettings
         if (saveHistory && !s.pauseSearchHistory && !s.incognitoSession) {
             val nextHist = store.addSearchHistory(query)
@@ -588,6 +666,89 @@ class SpotyViewModel(application: Application) : AndroidViewModel(application) {
         if (_uiState.value.searchQuery.trim().equals(query.trim(), ignoreCase = true)) {
             _uiState.update { it.copy(searchResults = res, isSearching = false) }
         }
+    }
+
+    fun loadMoreSearchResults() {
+        val cur = _uiState.value
+        val token = cur.searchResults.continuationToken ?: return
+        if (cur.isLoadingMoreSearch || cur.isSearching) return
+        val activeQuery = cur.searchQuery.trim()
+        val activeFilter = cur.searchFilter
+
+        loadMoreJob?.cancel()
+        loadMoreJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoadingMoreSearch = true) }
+            val next = InnerTubeMusicClient.searchContinuation(token, activeFilter)
+            _uiState.update { st ->
+                if (!st.searchQuery.trim().equals(activeQuery, ignoreCase = true)) {
+                    return@update st.copy(isLoadingMoreSearch = false)
+                }
+                val prev = st.searchResults
+                val existingTrackIds = prev.tracks.map { it.id }.toHashSet()
+                val existingVideoIds = prev.videos.map { it.id }.toHashSet()
+                val existingArtistIds = prev.artists.map { it.browseId }.toHashSet()
+                val existingAlbumIds = prev.albums.map { it.browseId }.toHashSet()
+                val existingPlaylistIds = prev.playlists.map { it.browseId }.toHashSet()
+
+                val merged = prev.copy(
+                    tracks = prev.tracks + next.tracks.filter { existingTrackIds.add(it.id) },
+                    videos = prev.videos + next.videos.filter { existingVideoIds.add(it.id) },
+                    artists = prev.artists + next.artists.filter { existingArtistIds.add(it.browseId) },
+                    albums = prev.albums + next.albums.filter { existingAlbumIds.add(it.browseId) },
+                    playlists = prev.playlists + next.playlists.filter { existingPlaylistIds.add(it.browseId) },
+                    continuationToken = next.continuationToken?.takeIf { it != token }
+                )
+                st.copy(searchResults = merged, isLoadingMoreSearch = false)
+            }
+        }
+    }
+
+    fun openAlbumForTrack(track: TrackItem) {
+        closeTrackMenu()
+        closeTrackCredits()
+        if (track.albumBrowseId.isNotBlank()) {
+            openCollectionDetail(track.albumBrowseId, track.album.ifBlank { track.title })
+            return
+        }
+        showToast("Mencari album ${track.album.ifBlank { track.title }}...")
+        viewModelScope.launch {
+            val found = InnerTubeMusicClient.findAlbumBrowseIdForTrack(track)
+            if (found != null) {
+                openCollectionDetail(found.first, found.second)
+            } else {
+                showToast("Album tidak tersedia untuk lagu ini")
+            }
+        }
+    }
+
+    fun openTrackCredits(track: TrackItem) {
+        closeTrackMenu()
+        val s = _uiState.value.appSettings
+        val quality = when {
+            track.localUri.isNotBlank() -> "File Audio Lokal • Lossless / Device"
+            s.playDataSaverCellular -> "Opus / M4A 96kbps • Hemat Kuota"
+            s.playHighBitrateWifi -> "Opus / M4A 256kbps • High Quality ExoPlayer"
+            else -> "Opus / M4A Adaptif • Media3 ExoPlayer"
+        }
+        _uiState.update {
+            it.copy(
+                creditsTrack = track,
+                loadedTrackCredits = null,
+                isCreditsLoading = true
+            )
+        }
+        creditsJob?.cancel()
+        creditsJob = viewModelScope.launch {
+            val data = InnerTubeMusicClient.fetchTrackCredits(track, quality)
+            if (_uiState.value.creditsTrack?.id == track.id) {
+                _uiState.update { it.copy(loadedTrackCredits = data, isCreditsLoading = false) }
+            }
+        }
+    }
+
+    fun closeTrackCredits() {
+        creditsJob?.cancel()
+        _uiState.update { it.copy(creditsTrack = null, loadedTrackCredits = null, isCreditsLoading = false) }
     }
 
     fun removeSearchHistory(item: String) {
