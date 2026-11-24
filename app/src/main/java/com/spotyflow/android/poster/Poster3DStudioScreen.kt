@@ -350,9 +350,56 @@ fun Poster3DStudioScreen(
                 uprightPhoto = photo
                 val seg = SpotyFlowDepthEngine.segmentSubject(context, photo)
                 depthResult = seg
-                config = config.copy(depthEnabled = seg.hasSubject)
+                val uBox = seg.unionBox
+                val updatedCards = if (uBox != null && uBox.size == 4 && config.cards.isNotEmpty()) {
+                    val pw = config.aspectRatio.exportW.toFloat()
+                    val ph = config.aspectRatio.exportH.toFloat()
+                    val iw = photo.width.toFloat().coerceAtLeast(1f)
+                    val ih = photo.height.toFloat().coerceAtLeast(1f)
+                    val baseScale = maxOf(pw / iw, ph / ih) * config.photoZoom.coerceIn(0.8f, 2.5f)
+                    val sw = iw * baseScale
+                    val sh = ih * baseScale
+                    val dx = (pw - sw) * 0.5f + config.photoPanX * pw * 0.35f
+                    val dy = (ph - sh) * 0.5f + config.photoPanY * ph * 0.35f
+                    fun mapX(v: Int) = ((dx + (v / 1000f) * sw) / pw).coerceIn(0.06f, 0.94f)
+                    fun mapY(v: Int) = ((dy + (v / 1000f) * sh) / ph).coerceIn(0.06f, 0.94f)
+                    val yMin = mapY(uBox[0])
+                    val xMin = mapX(uBox[1])
+                    val yMax = mapY(uBox[2])
+                    val xMax = mapX(uBox[3])
+                    val cx = (xMin + xMax) * 0.5f
+                    val objW = (xMax - xMin).coerceAtLeast(0.16f)
+                    val objH = (yMax - yMin).coerceAtLeast(0.18f)
+                    val leftX = (xMin + objW * 0.04f - 0.07f).coerceIn(0.19f, 0.42f)
+                    val rightX = (xMax - objW * 0.04f + 0.07f).coerceIn(0.58f, 0.81f)
+                    val topY = (yMin + objH * 0.24f).coerceIn(0.24f, 0.48f)
+                    val midY = (yMin + objH * 0.56f).coerceIn(0.45f, 0.70f)
+                    val crownY = (yMin + objH * 0.06f).coerceIn(0.20f, 0.38f)
+                    val slots = listOf(
+                        floatArrayOf(leftX, topY, 20f, 6f, -11f, 0.92f),
+                        floatArrayOf(rightX, (topY + 0.04f).coerceIn(0.24f, 0.52f), -20f, 6f, 11f, 0.92f),
+                        floatArrayOf((leftX - 0.02f).coerceIn(0.17f, 0.40f), midY, 16f, -5f, -7f, 0.84f),
+                        floatArrayOf((rightX + 0.02f).coerceIn(0.60f, 0.83f), midY, -16f, -5f, 8f, 0.84f),
+                        floatArrayOf(cx.coerceIn(0.36f, 0.64f), crownY, 0f, 9f, -2f, 0.85f)
+                    )
+                    config.cards.mapIndexed { idx, card ->
+                        val sl = slots[idx % slots.size]
+                        card.copy(
+                            centerXFrac = sl[0],
+                            centerYFrac = sl[1],
+                            rotateYDeg = sl[2],
+                            rotateXDeg = sl[3],
+                            rotateZDeg = sl[4],
+                            scale = sl[5],
+                            inFrontOfSubject = false
+                        )
+                    }
+                } else {
+                    config.cards.map { it.copy(inFrontOfSubject = false) }
+                }
+                config = config.copy(depthEnabled = seg.hasSubject, cards = updatedCards)
                 onShowToast(
-                    if (seg.hasSubject) "Objek dipotong rapi (${seg.engineLabel}) + Cahaya Tepi aktif"
+                    if (seg.hasSubject) "Objek dipotong rapi & sampul diatur di belakang objek"
                     else "Foto dipasang (gunakan Kuas jika ingin memotong objek)"
                 )
             } else {

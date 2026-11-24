@@ -29,17 +29,25 @@ import com.google.mlkit.vision.segmentation.subject.SubjectSegmentation
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmenter
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
+import android.util.Base64
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.FloatBuffer
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.math.abs
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -50,7 +58,8 @@ data class DepthCutoutResult(
     val maskHeight: Int,
     val coverage: Float,
     val hasSubject: Boolean,
-    val engineLabel: String = "BRIA RMBG-1.4 HD"
+    val engineLabel: String = "",
+    val unionBox: IntArray? = null
 )
 
 data class CutoutBundle(
@@ -72,10 +81,16 @@ data class CutoutBundle(
  */
 object SpotyFlowDepthEngine {
 
+    private const val BACKEND_ANALYZE_URL = "https://spotyflow.vercel.app/api/poster/analyze"
     private const val RMBG_MODEL_URL =
         "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_quantized.onnx"
     private const val RMBG_FILE_NAME = "bria_rmbg_14_q8.onnx"
     private const val RMBG_INPUT_SIZE = 1024
+
+    private data class BackendScanResult(
+        val subjects: List<IntArray>,
+        val unionBox: IntArray?
+    )
 
     @Volatile
     private var cachedOrtSession: OrtSession? = null
@@ -173,36 +188,165 @@ object SpotyFlowDepthEngine {
         uprightFullPhoto: Bitmap,
         onStatus: (String) -> Unit = {}
     ): DepthCutoutResult = withContext(Dispatchers.Default) {
-        // Tier 1: BRIA RMBG-1.4 Native C++ ONNX (Studio-Grade Full-Scene Background Removal!)
-        val rmbgRes = tryBriaRmbgOnnx(context, uprightFullPhoto, onStatus)
-        if (rmbgRes != null && rmbgRes.hasSubject) {
-            return@withContext rmbgRes
-        }
-
-        val maxWorkSide = 1024
-        val longest = max(uprightFullPhoto.width, uprightFullPhoto.height)
-        val workBmp = if (longest > maxWorkSide) {
-            val scale = maxWorkSide.toFloat() / longest.toFloat()
-            val w = (uprightFullPhoto.width * scale).roundToInt().coerceAtLeast(32)
-            val h = (uprightFullPhoto.height * scale).roundToInt().coerceAtLeast(32)
-            Bitmap.createScaledBitmap(uprightFullPhoto, w, h, true)
-        } else {
-            uprightFullPhoto
-        }
-
-        try {
-            // Tier 2: Google ML Kit Subject Segmentation
-            val subjectRes = trySubjectSegmentation(context, workBmp, onStatus)
-            if (subjectRes != null && subjectRes.hasSubject) {
-                return@withContext subjectRes
+        coroutineScope {
+            val backendDeferred = async(Dispatchers.IO) {
+                analyzePhotoViaBackend(uprightFullPhoto)
             }
 
-            // Tier 3: Offline ML Kit Selfie Segmentation Fallback
-            onStatus("Memproses AI Potong Offline...")
-            trySelfieSegmentation(workBmp)
-        } finally {
-            if (workBmp !== uprightFullPhoto) workBmp.recycle()
+            // Tier 1: Local full-res silhouette extractor
+            var baseResult = tryBriaRmbgOnnx(context, uprightFullPhoto, onStatus)
+
+            if (baseResult == null || !baseResult.hasSubject) {
+                val maxWorkSide = 1024
+                val longest = max(uprightFullPhoto.width, uprightFullPhoto.height)
+                val workBmp = if (longest > maxWorkSide) {
+                    val scale = maxWorkSide.toFloat() / longest.toFloat()
+                    val w = (uprightFullPhoto.width * scale).roundToInt().coerceAtLeast(32)
+                    val h = (uprightFullPhoto.height * scale).roundToInt().coerceAtLeast(32)
+                    Bitmap.createScaledBitmap(uprightFullPhoto, w, h, true)
+                } else {
+                    uprightFullPhoto
+                }
+                try {
+                    val subjectRes = trySubjectSegmentation(context, workBmp, onStatus)
+                    baseResult = if (subjectRes != null && subjectRes.hasSubject) {
+                        subjectRes
+                    } else {
+                        onStatus("Memisahkan objek dari latar...")
+                        trySelfieSegmentation(workBmp)
+                    }
+                } finally {
+                    if (workBmp !== uprightFullPhoto) workBmp.recycle()
+                }
+            }
+
+            val backendScan = withTimeoutOrNull(14_000L) { backendDeferred.await() }
+            val result = baseResult ?: DepthCutoutResult(FloatArray(0), 0, 0, 0f, false, "", null)
+
+            if (result.hasSubject && backendScan != null && backendScan.subjects.isNotEmpty()) {
+                val gated = applySemanticRegionGate(
+                    conf = result.rawConfidence,
+                    w = result.maskWidth,
+                    h = result.maskHeight,
+                    boxes = backendScan.subjects
+                )
+                var fg = 0
+                for (v in gated) if (v > 0.5f) fg++
+                val cov = fg.toFloat() / gated.size.coerceAtLeast(1).toFloat()
+                if (cov >= 0.005f) {
+                    return@coroutineScope result.copy(
+                        rawConfidence = gated,
+                        coverage = cov,
+                        unionBox = backendScan.unionBox
+                    )
+                }
+            }
+
+            result.copy(unionBox = backendScan?.unionBox)
         }
+    }
+
+    private fun analyzePhotoViaBackend(photo: Bitmap): BackendScanResult? {
+        return try {
+            val longest = max(photo.width, photo.height)
+            val sc = min(1f, 768f / longest.coerceAtLeast(1).toFloat())
+            val w = (photo.width * sc).roundToInt().coerceAtLeast(64)
+            val h = (photo.height * sc).roundToInt().coerceAtLeast(64)
+            val resized = if (w != photo.width || h != photo.height) {
+                Bitmap.createScaledBitmap(photo, w, h, true)
+            } else {
+                photo
+            }
+            val baos = ByteArrayOutputStream()
+            resized.compress(Bitmap.CompressFormat.JPEG, 84, baos)
+            if (resized !== photo) resized.recycle()
+            val b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
+
+            val payload = JSONObject()
+                .put("imageBase64", b64)
+                .put("mimeType", "image/jpeg")
+                .put("cardCount", 3)
+                .toString()
+
+            val req = Request.Builder()
+                .url(BACKEND_ANALYZE_URL)
+                .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+
+            downloadClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val bodyStr = resp.body?.string() ?: return null
+                val json = JSONObject(bodyStr)
+                if (!json.optBoolean("ok", false)) return null
+                val arr = json.optJSONArray("subjects") ?: return null
+                val boxes = ArrayList<IntArray>(arr.length())
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val b = obj.optJSONArray("box_2d") ?: continue
+                    if (b.length() == 4) {
+                        boxes.add(intArrayOf(b.optInt(0), b.optInt(1), b.optInt(2), b.optInt(3)))
+                    }
+                }
+                val uArr = json.optJSONArray("unionBox")
+                val uBox = if (uArr != null && uArr.length() == 4) {
+                    intArrayOf(uArr.optInt(0), uArr.optInt(1), uArr.optInt(2), uArr.optInt(3))
+                } else null
+                if (boxes.isEmpty()) null else BackendScanResult(boxes, uBox)
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun applySemanticRegionGate(
+        conf: FloatArray,
+        w: Int,
+        h: Int,
+        boxes: List<IntArray>
+    ): FloatArray {
+        val total = w * h
+        val gate = FloatArray(total)
+        val padX = w * 0.035f
+        val padY = h * 0.035f
+        val featherPx = max(4f, min(w, h) * 0.02f)
+        for (b in boxes) {
+            if (b.size != 4) continue
+            val y0 = (b[0] / 1000f) * h - padY
+            val x0 = (b[1] / 1000f) * w - padX
+            val y1 = (b[2] / 1000f) * h + padY
+            val x1 = (b[3] / 1000f) * w + padX
+            val iy0 = (y0 - featherPx).toInt().coerceIn(0, h - 1)
+            val iy1 = (y1 + featherPx).toInt().coerceIn(0, h - 1)
+            val ix0 = (x0 - featherPx).toInt().coerceIn(0, w - 1)
+            val ix1 = (x1 + featherPx).toInt().coerceIn(0, w - 1)
+            for (y in iy0..iy1) {
+                val dy = when {
+                    y < y0 -> y0 - y
+                    y > y1 -> y - y1
+                    else -> 0f
+                }
+                val row = y * w
+                for (x in ix0..ix1) {
+                    val dx = when {
+                        x < x0 -> x0 - x
+                        x > x1 -> x - x1
+                        else -> 0f
+                    }
+                    val dist = hypot(dx.toDouble(), dy.toDouble()).toFloat()
+                    val v = when {
+                        dist <= 0f -> 1f
+                        dist >= featherPx -> 0f
+                        else -> 1f - (dist / featherPx)
+                    }
+                    if (v > gate[row + x]) gate[row + x] = v
+                }
+            }
+        }
+        val out = FloatArray(total)
+        for (i in 0 until total) {
+            out[i] = conf[i] * gate[i]
+        }
+        return out
     }
 
     private suspend fun ensureRmbgModelFile(
@@ -215,7 +359,7 @@ object SpotyFlowDepthEngine {
         }
         val tmp = File(context.filesDir, "$RMBG_FILE_NAME.tmp")
         try {
-            onStatus("Mengunduh AI BRIA RMBG-1.4 (sekali saja)...")
+            onStatus("Menyiapkan pemotong objek...")
             val req = Request.Builder().url(RMBG_MODEL_URL).build()
             downloadClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return@withContext null
@@ -234,7 +378,7 @@ object SpotyFlowDepthEngine {
                             val pct = ((downloaded * 100L) / totalBytes).toInt().coerceIn(0, 99)
                             if (pct != lastPct && pct % 4 == 0) {
                                 lastPct = pct
-                                onStatus("Mengunduh AI BRIA RMBG-1.4 ($pct%)...")
+                                onStatus("Menyiapkan pemotong objek ($pct%)...")
                             }
                         }
                         output.flush()
@@ -261,7 +405,7 @@ object SpotyFlowDepthEngine {
     ): DepthCutoutResult? {
         val modelFile = ensureRmbgModelFile(context, onStatus) ?: return null
         return try {
-            onStatus("Menghapus latar belakang (BRIA RMBG-1.4 HD)...")
+            onStatus("Menghapus latar belakang foto...")
             val env = OrtEnvironment.getEnvironment()
             val session = cachedOrtSession ?: synchronized(this) {
                 cachedOrtSession ?: run {
