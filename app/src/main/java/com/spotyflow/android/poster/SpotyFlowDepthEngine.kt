@@ -3,10 +3,13 @@ package com.spotyflow.android.poster
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.PorterDuff
+import android.graphics.PorterDuffColorFilter
 import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.net.Uri
@@ -29,12 +32,19 @@ data class DepthCutoutResult(
     val hasSubject: Boolean
 )
 
+data class CutoutBundle(
+    val cutoutBitmap: Bitmap,
+    val alphaMaskBitmap: Bitmap
+)
+
 /**
- * 100% Offline Subject/Human Background Cutout Engine using Google ML Kit Selfie Segmentation (16.0.0-beta6).
+ * 100% Offline Subject/Human Background Cutout & Colored Inner Rim Light Engine
+ * using Google ML Kit Selfie Segmentation (16.0.0-beta6).
  * - Guarantees EXIF-upright photo decoding (max 1600px, ARGB_8888)
  * - Preserves raw float confidence map so Sensitivity & Edge Feather sliders re-render instantaneously
  * - Supports interactive finger Manual Brush Mask (+ Foreground / - Background)
  * - Copies full-resolution upright subject onto 100% transparent canvas via PorterDuff.Mode.DST_IN
+ * - Generates true inner-only Colored Rim Light glow hugging subject edges without bleeding outside
  */
 object SpotyFlowDepthEngine {
 
@@ -61,7 +71,7 @@ object SpotyFlowDepthEngine {
             if (rawW <= 0 || rawH <= 0) return@withContext null
 
             var sampleSize = 1
-            var longest = max(rawW, rawH)
+            val longest = max(rawW, rawH)
             while (longest / sampleSize > maxSide * 2) {
                 sampleSize *= 2
             }
@@ -183,12 +193,10 @@ object SpotyFlowDepthEngine {
         }
 
     /**
-     * Builds Full-HD transparent subject cutout copied pixel-for-pixel from uprightFullPhoto.
-     * manualBrushMask encoding (optional, maskW x maskH ARGB_8888):
-     *   - alpha > 30 && green > red -> user painted "+ Tambah Objek" (force alpha = 255)
-     *   - alpha > 30 && red >= green -> user painted "- Hapus Latar" (force alpha = 0)
+     * Builds Full-HD transparent subject cutout AND retains the lightweight alphaMaskBitmap
+     * so Colored Inner Rim Light can be rebuilt instantaneously without re-running ML Kit.
      */
-    fun buildTransparentObjectCutout(
+    fun buildTransparentObjectCutoutWithMask(
         uprightFullPhoto: Bitmap,
         rawConfidence: FloatArray,
         maskW: Int,
@@ -196,11 +204,11 @@ object SpotyFlowDepthEngine {
         sensitivity: Float = 0.48f,
         edgeFeather: Float = 0.45f,
         manualBrushMask: Bitmap? = null
-    ): Bitmap? {
+    ): CutoutBundle? {
         if (maskW <= 0 || maskH <= 0 || rawConfidence.size < maskW * maskH) return null
 
         val sens = sensitivity.coerceIn(0.15f, 0.85f)
-        val featherSpan = (0.02f + edgeFeather.coerceIn(0f, 1f) * 0.24f)
+        val featherSpan = 0.02f + edgeFeather.coerceIn(0f, 1f) * 0.24f
         val low = (sens - featherSpan).coerceAtLeast(0.01f)
         val high = (sens + featherSpan).coerceAtMost(0.99f)
         val invRange = 1f / (high - low).coerceAtLeast(0.01f)
@@ -263,8 +271,82 @@ object SpotyFlowDepthEngine {
         }
         val dstRect = Rect(0, 0, uprightFullPhoto.width, uprightFullPhoto.height)
         canvas.drawBitmap(alphaMaskBmp, null, dstRect, maskPaint)
-        alphaMaskBmp.recycle()
 
-        return cutoutBmp
+        return CutoutBundle(cutoutBitmap = cutoutBmp, alphaMaskBitmap = alphaMaskBmp)
+    }
+
+    /**
+     * Upgrade #1: True Colored Inner-Rim Light Overlay (0% bleed outside subject!).
+     * 1. Downscale alphaMask to <= 512px preserving exact aspect ratio.
+     * 2. Build invertedMask (outside body = solid white alpha 255, inside body = transparent alpha 0).
+     * 3. Blur invertedMask softly on software canvas & tint with rimColor via PorterDuffColorFilter(SRC_IN).
+     * 4. Clip strictly inside the subject with original workAlpha via PorterDuffXfermode(DST_IN).
+     */
+    fun buildInnerRimLightOverlay(
+        alphaMask: Bitmap,
+        rimColor: Int,
+        spreadPx: Float = 14f
+    ): Bitmap? {
+        if (alphaMask.isRecycled || alphaMask.width <= 0 || alphaMask.height <= 0) return null
+        val maxSide = 512
+        val longest = max(alphaMask.width, alphaMask.height)
+        val workAlpha = if (longest > maxSide) {
+            val scale = maxSide.toFloat() / longest.toFloat()
+            val w = (alphaMask.width * scale).roundToInt().coerceAtLeast(8)
+            val h = (alphaMask.height * scale).roundToInt().coerceAtLeast(8)
+            Bitmap.createScaledBitmap(alphaMask, w, h, true)
+        } else {
+            alphaMask
+        }
+
+        val w = workAlpha.width
+        val h = workAlpha.height
+        val safeSpread = spreadPx.coerceIn(4f, 36f)
+
+        // Step 1: Inverted mask (solid white outside body, transparent inside body)
+        val invertedMask = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val invCanvas = Canvas(invertedMask)
+        invCanvas.drawColor(Color.WHITE)
+        val erasePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
+        }
+        invCanvas.drawBitmap(workAlpha, 0f, 0f, erasePaint)
+
+        // Step 2: Softly blurred colored halo flowing inward from the inverted outside region
+        val rimOut = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val rimCanvas = Canvas(rimOut)
+        val blurPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+            maskFilter = BlurMaskFilter(safeSpread, BlurMaskFilter.Blur.NORMAL)
+            colorFilter = PorterDuffColorFilter(rimColor, PorterDuff.Mode.SRC_IN)
+        }
+        // Draw slightly expanded inverted border glow so edges near canvas boundaries glow evenly
+        rimCanvas.drawBitmap(invertedMask, 0f, 0f, blurPaint)
+        // Second tighter core pass for crisp specular edge catch right along hair/cheeks/shoulders
+        val corePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+            maskFilter = BlurMaskFilter((safeSpread * 0.42f).coerceAtLeast(2.5f), BlurMaskFilter.Blur.NORMAL)
+            colorFilter = PorterDuffColorFilter(blendTowardWhite(rimColor, 0.35f), PorterDuff.Mode.SRC_IN)
+            alpha = 185
+        }
+        rimCanvas.drawBitmap(invertedMask, 0f, 0f, corePaint)
+
+        // Step 3: Clip strictly INSIDE subject silhouette (0% outside bleed!)
+        val clipInPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+        }
+        rimCanvas.drawBitmap(workAlpha, 0f, 0f, clipInPaint)
+
+        // Immediately recycle temporary bitmaps
+        invertedMask.recycle()
+        if (workAlpha !== alphaMask) workAlpha.recycle()
+
+        return rimOut
+    }
+
+    private fun blendTowardWhite(argb: Int, ratio: Float): Int {
+        val inv = 1f - ratio
+        val r = (Color.red(argb) * inv + 255f * ratio).toInt().coerceIn(0, 255)
+        val g = (Color.green(argb) * inv + 255f * ratio).toInt().coerceIn(0, 255)
+        val b = (Color.blue(argb) * inv + 255f * ratio).toInt().coerceIn(0, 255)
+        return Color.rgb(r, g, b)
     }
 }

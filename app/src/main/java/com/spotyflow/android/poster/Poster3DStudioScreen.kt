@@ -20,6 +20,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,30 +41,23 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowBackIosNew
-import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.Brush
 import androidx.compose.material.icons.rounded.Check
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
-import androidx.compose.material.icons.rounded.GridOn
-import androidx.compose.material.icons.rounded.Image
-import androidx.compose.material.icons.rounded.Layers
-import androidx.compose.material.icons.rounded.MusicNote
+import androidx.compose.material.icons.rounded.FlipToBack
+import androidx.compose.material.icons.rounded.FlipToFront
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
-import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.Undo
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
@@ -70,10 +65,9 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -93,8 +87,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.spotyflow.android.data.LyricLine
 import com.spotyflow.android.data.PlayerUiState
 import com.spotyflow.android.data.TrackItem
+import com.spotyflow.android.data.remote.LyricsRepository
 import com.spotyflow.android.data.remote.SpotyHttpClient
 import com.spotyflow.android.ui.glass.SpotyArtwork
 import com.spotyflow.android.ui.glass.SpotyGlassCard
@@ -117,8 +113,14 @@ private enum class PosterTab(val label: String) {
     STICKERS("Stiker")
 }
 
+private sealed interface SelectedPosterObject {
+    data class Card(val index: Int) : SelectedPosterObject
+    data class Sticker(val id: String) : SelectedPosterObject
+    data object DepthText : SelectedPosterObject
+}
+
 private data class BrushStroke(
-    val points: List<Pair<Float, Float>>, // normalized 0..1 inside photo mask
+    val points: List<Pair<Float, Float>>,
     val addForeground: Boolean,
     val radiusFrac: Float
 )
@@ -136,7 +138,6 @@ fun Poster3DStudioScreen(
 
     BackHandler(onBack = onBack)
 
-    // Initial track pool (1-5 songs selectable without interrupting audio!)
     val initialTracks = remember(initialTrack?.id, uiState.currentTrack?.id) {
         val base = listOfNotNull(initialTrack ?: uiState.currentTrack)
         if (base.isNotEmpty()) base else uiState.homeTracks.take(1)
@@ -146,13 +147,26 @@ fun Poster3DStudioScreen(
     var config by remember {
         mutableStateOf(
             PosterStudioConfig(
-                cards = Poster3DRenderer.defaultCardsForFormation(initialTracks, PosterFormation.MIRROR_SHOULDERS)
+                cards = Poster3DRenderer.defaultCardsForFormation(initialTracks, PosterFormation.MIRROR_SHOULDERS),
+                depthText = DepthTypographyConfig(
+                    enabled = false,
+                    text = initialTracks.firstOrNull()?.title?.uppercase() ?: "SPOTYFLOW"
+                )
             )
         )
     }
 
     var activeTab by remember { mutableStateOf(PosterTab.PHOTO) }
+    var activePreset by remember { mutableStateOf<PosterProPreset?>(null) }
+    var selectedObject by remember { mutableStateOf<SelectedPosterObject>(SelectedPosterObject.Card(0)) }
+
     var showSongPicker by remember { mutableStateOf(false) }
+    var showLyricPicker by remember { mutableStateOf(false) }
+    var showCustomTextDialog by remember { mutableStateOf(false) }
+    var customTextDraft by remember { mutableStateOf("") }
+    var fetchedLyricLines by remember { mutableStateOf<List<LyricLine>>(emptyList()) }
+    var isFetchingLyrics by remember { mutableStateOf(false) }
+
     var showCutoutPreview by remember { mutableStateOf(false) }
     var isBrushMode by remember { mutableStateOf(false) }
     var brushAddForeground by remember { mutableStateOf(true) }
@@ -164,14 +178,23 @@ fun Poster3DStudioScreen(
     var uprightPhoto by remember { mutableStateOf<Bitmap?>(null) }
     var depthResult by remember { mutableStateOf<DepthCutoutResult?>(null) }
     var cutoutBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var alphaMaskBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var rimLightOverlayBmp by remember { mutableStateOf<Bitmap?>(null) }
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var coverBitmaps by remember { mutableStateOf<Map<String, Bitmap>>(emptyMap()) }
     var customStickerFiles by remember { mutableStateOf<List<File>>(emptyList()) }
     var customStickerBitmaps by remember { mutableStateOf<Map<String, Bitmap>>(emptyMap()) }
     var previewBoxSize by remember { mutableStateOf(IntSize(540, 960)) }
-    var selectedStickerId by remember { mutableStateOf<String?>(null) }
 
-    val dominantAccentArgb = uiState.ambientPalette.accent.toArgb()
+    val dominantAccentArgb = selectedTracks.firstOrNull()?.accentColor?.toArgb()
+        ?: uiState.ambientPalette.accent.toArgb()
+
+    // Release cached flat card bitmaps cleanly on exit
+    DisposableEffect(Unit) {
+        onDispose {
+            Poster3DRenderer.clearFlatCardCache()
+        }
+    }
 
     // Load custom stickers from filesDir/custom_stickers
     LaunchedEffect(Unit) {
@@ -205,22 +228,20 @@ fun Poster3DStudioScreen(
                                 }
                             }
                         }
-                    } catch (_: Throwable) {
-                        // Fallback handled by renderer
-                    }
+                    } catch (_: Throwable) {}
                 }
             }
             coverBitmaps = updated
         }
     }
 
-    // Rebuild transparent cutout instantaneously when sensitivity / edgeFeather / manual brush changes
+    // Rebuild Full-HD transparent cutout & alphaMask when sensitivity / edgeFeather / manual brush changes
     LaunchedEffect(uprightPhoto, depthResult, config.sensitivity, config.edgeFeather, brushStrokes) {
         val photo = uprightPhoto ?: return@LaunchedEffect
         val seg = depthResult ?: return@LaunchedEffect
         if (seg.maskWidth <= 0 || seg.maskHeight <= 0) return@LaunchedEffect
 
-        val built = withContext(Dispatchers.Default) {
+        val bundle = withContext(Dispatchers.Default) {
             val brushBmp = if (brushStrokes.isNotEmpty()) {
                 val b = Bitmap.createBitmap(seg.maskWidth, seg.maskHeight, Bitmap.Config.ARGB_8888)
                 val c = AndroidCanvas(b)
@@ -247,7 +268,7 @@ fun Poster3DStudioScreen(
             } else {
                 null
             }
-            val result = SpotyFlowDepthEngine.buildTransparentObjectCutout(
+            val res = SpotyFlowDepthEngine.buildTransparentObjectCutoutWithMask(
                 uprightFullPhoto = photo,
                 rawConfidence = seg.rawConfidence,
                 maskW = seg.maskWidth,
@@ -257,13 +278,40 @@ fun Poster3DStudioScreen(
                 manualBrushMask = brushBmp
             )
             brushBmp?.recycle()
-            result
+            res
         }
-        cutoutBitmap = built
+        cutoutBitmap = bundle?.cutoutBitmap
+        alphaMaskBitmap = bundle?.alphaMaskBitmap
     }
 
-    // Re-render live preview bitmap off main thread
-    LaunchedEffect(config, selectedTracks, coverBitmaps, uprightPhoto, cutoutBitmap, showCutoutPreview, isBrushMode, brushStrokes, customStickerBitmaps) {
+    // Upgrade #1: Cached Colored Inner Rim Light overlay — rebuilt ONLY when alphaMask or accent color changes!
+    LaunchedEffect(alphaMaskBitmap, dominantAccentArgb) {
+        val alpha = alphaMaskBitmap
+        if (alpha == null || alpha.isRecycled) {
+            rimLightOverlayBmp = null
+            return@LaunchedEffect
+        }
+        val built = withContext(Dispatchers.Default) {
+            SpotyFlowDepthEngine.buildInnerRimLightOverlay(
+                alphaMask = alpha,
+                rimColor = dominantAccentArgb,
+                spreadPx = 15f
+            )
+        }
+        rimLightOverlayBmp = built
+    }
+
+    // Re-render live preview bitmap off main thread (flat cards & rim light are cached!)
+    LaunchedEffect(
+        config,
+        selectedTracks,
+        coverBitmaps,
+        uprightPhoto,
+        cutoutBitmap,
+        rimLightOverlayBmp,
+        showCutoutPreview,
+        customStickerBitmaps
+    ) {
         val ratio = config.aspectRatio
         val prevW = if (ratio.exportW >= ratio.exportH) 640 else 480
         val prevH = ((prevW.toFloat() * ratio.exportH.toFloat()) / ratio.exportW.toFloat()).toInt().coerceAtLeast(240)
@@ -281,6 +329,7 @@ fun Poster3DStudioScreen(
                     customStickerBitmaps = customStickerBitmaps,
                     uprightFullPhoto = uprightPhoto,
                     cutoutBmp = cutoutBitmap,
+                    rimLightOverlayBmp = rimLightOverlayBmp,
                     dominantAccentArgb = dominantAccentArgb
                 )
             }
@@ -303,7 +352,7 @@ fun Poster3DStudioScreen(
                 depthResult = seg
                 config = config.copy(depthEnabled = seg.hasSubject)
                 onShowToast(
-                    if (seg.hasSubject) "Objek dipotong otomatis & ditaruh di depan sampul"
+                    if (seg.hasSubject) "Objek dipotong + Cahaya Tepi aktif otomatis"
                     else "Foto dipasang (gunakan Kuas jika ingin memotong objek)"
                 )
             } else {
@@ -345,11 +394,26 @@ fun Poster3DStudioScreen(
                             yFrac = 0.25f
                         )
                         config = config.copy(stickers = config.stickers + st)
-                        selectedStickerId = st.id
+                        selectedObject = SelectedPosterObject.Sticker(st.id)
                     }
                     onShowToast("Stiker kustom ditambahkan")
                 }
             }
+        }
+    }
+
+    fun openLyricLinePicker() {
+        val lead = selectedTracks.firstOrNull() ?: return
+        showLyricPicker = true
+        if (uiState.currentTrack?.id == lead.id && uiState.lyricsResult.activeList.isNotEmpty()) {
+            fetchedLyricLines = uiState.lyricsResult.activeList
+            return
+        }
+        isFetchingLyrics = true
+        scope.launch {
+            val res = LyricsRepository.fetchLyrics(lead)
+            fetchedLyricLines = res.activeList
+            isFetchingLyrics = false
         }
     }
 
@@ -367,6 +431,7 @@ fun Poster3DStudioScreen(
                     customStickerBitmaps = customStickerBitmaps,
                     uprightFullPhoto = uprightPhoto,
                     cutoutBmp = cutoutBitmap,
+                    rimLightOverlayBmp = rimLightOverlayBmp,
                     dominantAccentArgb = dominantAccentArgb
                 )
                 val uri = savePosterPngToGallery(context, bmp)
@@ -408,7 +473,7 @@ fun Poster3DStudioScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 8.dp),
+                .padding(horizontal = 14.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -416,7 +481,7 @@ fun Poster3DStudioScreen(
                 SpotyGlassCircleButton(onClick = onBack, size = 38.dp, useFloatingLayer = false) {
                     Icon(Icons.Rounded.ArrowBackIosNew, contentDescription = "Kembali", tint = SpotyColors.Slate900, modifier = Modifier.size(16.dp))
                 }
-                Text("Poster lagu", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = SpotyColors.Slate900)
+                Text("Poster lagu 3D", fontSize = 17.5.sp, fontWeight = FontWeight.ExtraBold, color = SpotyColors.Slate900)
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -425,8 +490,13 @@ fun Poster3DStudioScreen(
                         brushStrokes = emptyList()
                         showCutoutPreview = false
                         isBrushMode = false
+                        activePreset = null
                         config = PosterStudioConfig(
-                            cards = Poster3DRenderer.defaultCardsForFormation(selectedTracks, PosterFormation.MIRROR_SHOULDERS)
+                            cards = Poster3DRenderer.defaultCardsForFormation(selectedTracks, PosterFormation.MIRROR_SHOULDERS),
+                            depthText = DepthTypographyConfig(
+                                enabled = false,
+                                text = selectedTracks.firstOrNull()?.title?.uppercase() ?: "SPOTYFLOW"
+                            )
                         )
                         onShowToast("Desain direset")
                     },
@@ -458,16 +528,134 @@ fun Poster3DStudioScreen(
         }
 
         // =====================================================================
-        // INTERACTIVE LIVE PREVIEW CANVAS (Drag Cards/Stickers OR Manual Refine Brush)
+        // INTERACTIVE LIVE PREVIEW (2-Finger Pinch/Rotate/Pan OR 1-Finger Brush)
         // =====================================================================
         Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 4.dp),
+                .padding(horizontal = 16.dp, vertical = 2.dp),
             contentAlignment = Alignment.Center
         ) {
             val ratioFloat = config.aspectRatio.exportW.toFloat() / config.aspectRatio.exportH.toFloat()
+            val previewGesturesModifier = if (isBrushMode) {
+                Modifier.pointerInput(brushAddForeground) {
+                    detectDragGestures(
+                        onDragStart = { startOffset ->
+                            val w = previewBoxSize.width.coerceAtLeast(1).toFloat()
+                            val h = previewBoxSize.height.coerceAtLeast(1).toFloat()
+                            currentStrokePoints = listOf(
+                                (startOffset.x / w).coerceIn(0f, 1f) to (startOffset.y / h).coerceIn(0f, 1f)
+                            )
+                        },
+                        onDrag = { change, _ ->
+                            change.consume()
+                            val w = previewBoxSize.width.coerceAtLeast(1).toFloat()
+                            val h = previewBoxSize.height.coerceAtLeast(1).toFloat()
+                            currentStrokePoints = currentStrokePoints + (
+                                (change.position.x / w).coerceIn(0f, 1f) to (change.position.y / h).coerceIn(0f, 1f)
+                            )
+                        },
+                        onDragEnd = {
+                            if (currentStrokePoints.isNotEmpty()) {
+                                brushStrokes = brushStrokes + BrushStroke(
+                                    points = currentStrokePoints,
+                                    addForeground = brushAddForeground,
+                                    radiusFrac = 0.065f
+                                )
+                                currentStrokePoints = emptyList()
+                            }
+                        }
+                    )
+                }
+            } else {
+                // Upgrade #5: Hit-test tap selection + 2-finger Pinch/Rotate + 1-finger Pan (stable keys = zero gesture restart!)
+                Modifier
+                    .pointerInput(Unit) {
+                        detectTapGestures { tapOffset ->
+                            val w = previewBoxSize.width.coerceAtLeast(1).toFloat()
+                            val h = previewBoxSize.height.coerceAtLeast(1).toFloat()
+                            val nx = (tapOffset.x / w).coerceIn(0f, 1f)
+                            val ny = (tapOffset.y / h).coerceIn(0f, 1f)
+
+                            val hitSticker = config.stickers.lastOrNull { st ->
+                                hypot(st.xFrac - nx, st.yFrac - ny) < 0.11f
+                            }
+                            if (hitSticker != null) {
+                                selectedObject = SelectedPosterObject.Sticker(hitSticker.id)
+                                return@detectTapGestures
+                            }
+
+                            if (config.depthText.enabled &&
+                                kotlin.math.abs(config.depthText.posY - ny) < 0.11f &&
+                                kotlin.math.abs(config.depthText.posX - nx) < 0.36f
+                            ) {
+                                selectedObject = SelectedPosterObject.DepthText
+                                return@detectTapGestures
+                            }
+
+                            val cardIdx = config.cards.indices.minByOrNull { i ->
+                                hypot(config.cards[i].centerXFrac - nx, config.cards[i].centerYFrac - ny)
+                            }
+                            if (cardIdx != null) {
+                                selectedObject = SelectedPosterObject.Card(cardIdx)
+                            }
+                        }
+                    }
+                    .pointerInput(Unit) {
+                        detectTransformGestures { _, pan, zoom, rotation ->
+                            val w = previewBoxSize.width.coerceAtLeast(1).toFloat()
+                            val h = previewBoxSize.height.coerceAtLeast(1).toFloat()
+                            val dx = pan.x / w
+                            val dy = pan.y / h
+
+                            when (val sel = selectedObject) {
+                                is SelectedPosterObject.Sticker -> {
+                                    val idx = config.stickers.indexOfFirst { it.id == sel.id }
+                                    if (idx >= 0) {
+                                        val list = config.stickers.toMutableList()
+                                        val s = list[idx]
+                                        list[idx] = s.copy(
+                                            xFrac = (s.xFrac + dx).coerceIn(0.05f, 0.95f),
+                                            yFrac = (s.yFrac + dy).coerceIn(0.05f, 0.95f),
+                                            scale = (s.scale * zoom).coerceIn(0.45f, 2.2f),
+                                            rotationDeg = s.rotationDeg + rotation
+                                        )
+                                        config = config.copy(stickers = list)
+                                    }
+                                }
+                                SelectedPosterObject.DepthText -> {
+                                    if (config.depthText.enabled) {
+                                        val dt = config.depthText
+                                        config = config.copy(
+                                            depthText = dt.copy(
+                                                posX = (dt.posX + dx).coerceIn(0.10f, 0.90f),
+                                                posY = (dt.posY + dy).coerceIn(0.08f, 0.92f),
+                                                scale = (dt.scale * zoom).coerceIn(0.45f, 2.2f),
+                                                rotationDeg = dt.rotationDeg + rotation
+                                            )
+                                        )
+                                    }
+                                }
+                                is SelectedPosterObject.Card -> {
+                                    val idx = sel.index.coerceIn(0, (config.cards.size - 1).coerceAtLeast(0))
+                                    if (idx in config.cards.indices) {
+                                        val list = config.cards.toMutableList()
+                                        val c = list[idx]
+                                        list[idx] = c.copy(
+                                            centerXFrac = (c.centerXFrac + dx).coerceIn(0.08f, 0.92f),
+                                            centerYFrac = (c.centerYFrac + dy).coerceIn(0.10f, 0.90f),
+                                            scale = (c.scale * zoom).coerceIn(0.45f, 2.2f),
+                                            rotateZDeg = c.rotateZDeg + rotation
+                                        )
+                                        config = config.copy(cards = list)
+                                    }
+                                }
+                            }
+                        }
+                    }
+            }
+
             Box(
                 modifier = Modifier
                     .aspectRatio(ratioFloat)
@@ -475,78 +663,7 @@ fun Poster3DStudioScreen(
                     .background(Color(0xFFE2E8F0))
                     .border(1.5.dp, Color.White, RoundedCornerShape(22.dp))
                     .onSizeChanged { previewBoxSize = it }
-                    .pointerInput(isBrushMode, brushAddForeground, config.cards, config.stickers) {
-                        var activeCardIdx = -1
-                        var activeStickerIdx = -1
-                        detectDragGestures(
-                            onDragStart = { startOffset ->
-                                val w = previewBoxSize.width.coerceAtLeast(1).toFloat()
-                                val h = previewBoxSize.height.coerceAtLeast(1).toFloat()
-                                val nx = (startOffset.x / w).coerceIn(0f, 1f)
-                                val ny = (startOffset.y / h).coerceIn(0f, 1f)
-
-                                if (isBrushMode) {
-                                    currentStrokePoints = listOf(nx to ny)
-                                } else {
-                                    // Check sticker hit first, then closest 3D music card
-                                    activeStickerIdx = config.stickers.indexOfLast { st ->
-                                        hypot(st.xFrac - nx, st.yFrac - ny) < 0.11f
-                                    }
-                                    if (activeStickerIdx >= 0) {
-                                        selectedStickerId = config.stickers[activeStickerIdx].id
-                                        activeCardIdx = -1
-                                    } else {
-                                        val cards = config.cards
-                                        activeCardIdx = cards.indices.minByOrNull { i ->
-                                            hypot(cards[i].centerXFrac - nx, cards[i].centerYFrac - ny)
-                                        } ?: -1
-                                    }
-                                }
-                            },
-                            onDrag = { change, dragAmount ->
-                                change.consume()
-                                val w = previewBoxSize.width.coerceAtLeast(1).toFloat()
-                                val h = previewBoxSize.height.coerceAtLeast(1).toFloat()
-                                if (isBrushMode) {
-                                    val nx = (change.position.x / w).coerceIn(0f, 1f)
-                                    val ny = (change.position.y / h).coerceIn(0f, 1f)
-                                    currentStrokePoints = currentStrokePoints + (nx to ny)
-                                } else if (activeStickerIdx >= 0 && activeStickerIdx < config.stickers.size) {
-                                    val dx = dragAmount.x / w
-                                    val dy = dragAmount.y / h
-                                    val updated = config.stickers.toMutableList()
-                                    val s = updated[activeStickerIdx]
-                                    updated[activeStickerIdx] = s.copy(
-                                        xFrac = (s.xFrac + dx).coerceIn(0.05f, 0.95f),
-                                        yFrac = (s.yFrac + dy).coerceIn(0.05f, 0.95f)
-                                    )
-                                    config = config.copy(stickers = updated)
-                                } else if (activeCardIdx >= 0 && activeCardIdx < config.cards.size) {
-                                    val dx = dragAmount.x / w
-                                    val dy = dragAmount.y / h
-                                    val updated = config.cards.toMutableList()
-                                    val c = updated[activeCardIdx]
-                                    updated[activeCardIdx] = c.copy(
-                                        centerXFrac = (c.centerXFrac + dx).coerceIn(0.08f, 0.92f),
-                                        centerYFrac = (c.centerYFrac + dy).coerceIn(0.10f, 0.90f)
-                                    )
-                                    config = config.copy(cards = updated)
-                                }
-                            },
-                            onDragEnd = {
-                                if (isBrushMode && currentStrokePoints.isNotEmpty()) {
-                                    brushStrokes = brushStrokes + BrushStroke(
-                                        points = currentStrokePoints,
-                                        addForeground = brushAddForeground,
-                                        radiusFrac = 0.065f
-                                    )
-                                    currentStrokePoints = emptyList()
-                                }
-                                activeCardIdx = -1
-                                activeStickerIdx = -1
-                            }
-                        )
-                    },
+                    .then(previewGesturesModifier),
                 contentAlignment = Alignment.Center
             ) {
                 previewBitmap?.let { bmp ->
@@ -567,7 +684,7 @@ fun Poster3DStudioScreen(
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             CircularProgressIndicator(color = Color.White, strokeWidth = 3.dp)
-                            Text("Memotong objek tanpa latar...", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                            Text("Memotong objek & Cahaya Tepi...", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
                         }
                     }
                 }
@@ -611,11 +728,56 @@ fun Poster3DStudioScreen(
         }
 
         // =====================================================================
-        // QUICK PILL ROW (Pilih Lagu 1-5 | 9:16 | 16:9 | 4:5 | 1:1 | Acak desain)
+        // UPGRADE #3: CONTEXTUAL LAYER MINI-BAR (Belakang Objek <-> Depan Objek)
+        // =====================================================================
+        if (!isBrushMode) {
+            ContextualLayerBar(
+                selectedObject = selectedObject,
+                config = config,
+                tracks = selectedTracks,
+                onToggleCardLayer = { idx ->
+                    if (idx in config.cards.indices) {
+                        val updated = config.cards.toMutableList()
+                        val nextFront = !updated[idx].inFrontOfSubject
+                        updated[idx] = updated[idx].copy(inFrontOfSubject = nextFront)
+                        config = config.copy(cards = updated)
+                    }
+                },
+                onToggleTextLayer = {
+                    config = config.copy(depthText = config.depthText.copy(behindSubject = !config.depthText.behindSubject))
+                },
+                onToggleStickerLayer = { id ->
+                    config = config.copy(
+                        stickers = config.stickers.map { if (it.id == id) it.copy(behindSubject = !it.behindSubject) else it }
+                    )
+                }
+            )
+        }
+
+        // =====================================================================
+        // UPGRADE #6: 5 ONE-TAP PRO PRESETS + QUICK PILL BAR
         // =====================================================================
         LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 3.dp),
+            horizontalArrangement = Arrangement.spacedBy(7.dp)
+        ) {
+            items(PosterProPreset.entries) { preset ->
+                QuickStudioPill(
+                    label = preset.label,
+                    selected = activePreset == preset,
+                    accentFill = true,
+                    onClick = {
+                        activePreset = preset
+                        config = Poster3DRenderer.applyProPreset(config, preset, selectedTracks)
+                        onShowToast("Preset ${preset.label} diterapkan")
+                    }
+                )
+            }
+        }
+
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 3.dp),
+            horizontalArrangement = Arrangement.spacedBy(7.dp)
         ) {
             item {
                 QuickStudioPill(
@@ -636,6 +798,7 @@ fun Poster3DStudioScreen(
                     label = "Acak desain",
                     selected = false,
                     onClick = {
+                        activePreset = null
                         val nextForm = PosterFormation.entries.random()
                         val nextStyle = PosterCardStyle.entries.random()
                         val nextBg = PosterBgPreset.entries.random()
@@ -657,18 +820,17 @@ fun Poster3DStudioScreen(
         SpotyGlassCard(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(258.dp)
+                .height(256.dp)
                 .padding(horizontal = 12.dp, vertical = 4.dp),
             shape = RoundedCornerShape(24.dp),
             tintAlpha = 0.88f,
             elevation = 14.dp
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // 5 Tab Strip
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                        .padding(horizontal = 10.dp, vertical = 7.dp),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     PosterTab.entries.forEach { tab ->
@@ -678,7 +840,7 @@ fun Poster3DStudioScreen(
                                 .clip(RoundedCornerShape(999.dp))
                                 .background(if (sel) SpotyColors.Slate900 else Color.Transparent)
                                 .clickable { activeTab = tab }
-                                .padding(horizontal = 11.dp, vertical = 7.dp)
+                                .padding(horizontal = 11.dp, vertical = 6.dp)
                         ) {
                             Text(
                                 text = tab.label,
@@ -690,14 +852,13 @@ fun Poster3DStudioScreen(
                     }
                 }
 
-                // Active Tab Controls
                 Column(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
                         .verticalScroll(rememberScrollState())
                         .padding(horizontal = 14.dp, vertical = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(9.dp)
                 ) {
                     when (activeTab) {
                         PosterTab.PHOTO -> {
@@ -730,6 +891,18 @@ fun Poster3DStudioScreen(
                                 }
                             }
 
+                            // Upgrade #4: 6 Cinematic Photo Color Filters + B&W Color-Pop
+                            Text("Filter Warna Foto", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = SpotyColors.Slate700)
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                items(PhotoColorFilter.entries) { flt ->
+                                    QuickStudioPill(
+                                        label = flt.label,
+                                        selected = config.photoFilter == flt,
+                                        onClick = { config = config.copy(photoFilter = flt) }
+                                    )
+                                }
+                            }
+
                             PosterSwitchRow(
                                 label = "Objek di Depan Sampul (Potong Latar Otomatis)",
                                 checked = config.depthEnabled,
@@ -740,12 +913,17 @@ fun Poster3DStudioScreen(
                             PosterSliderRow("Gelap Latar", config.bgDimPct, 0f..0.85f) { config = config.copy(bgDimPct = it) }
                             PosterSliderRow("Kabur Latar", config.bgBlurPct, 0f..1f) { config = config.copy(bgBlurPct = it) }
                             PosterSliderRow("Cahaya Kartu", config.cardGlowPct, 0f..1f) { config = config.copy(cardGlowPct = it) }
+                            // Upgrade #1: Rim Light Slider right below Cahaya Kartu
+                            PosterSliderRow("Cahaya Tepi (Rim Light)", config.rimLightPct, 0f..1f, pctDisplay = true) {
+                                config = config.copy(rimLightPct = it)
+                            }
                             PosterSliderRow("Zoom Foto", config.photoZoom, 1.0f..2.2f) { config = config.copy(photoZoom = it) }
                             PosterSliderRow("Geser Foto X", config.photoPanX, -1f..1f) { config = config.copy(photoPanX = it) }
                             PosterSliderRow("Geser Foto Y", config.photoPanY, -1f..1f) { config = config.copy(photoPanY = it) }
                         }
 
                         PosterTab.CARDS -> {
+                            Text("Tip: Ketuk kartu di preview lalu cubit/putar pakai 2 jari!", fontSize = 11.5.sp, color = SpotyColors.DeepEmerald, fontWeight = FontWeight.SemiBold)
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 items(PosterFormation.entries) { form ->
                                     QuickStudioPill(
@@ -780,24 +958,97 @@ fun Poster3DStudioScreen(
                                     )
                                 }
                             }
+                            // Upgrade #7: Glass Water Drops toggle on 3D cards
+                            PosterSwitchRow("Tetesan Air Kaca (SpotyFlow Dew Optics)", config.cardWaterDrops) {
+                                config = config.copy(cardWaterDrops = it)
+                            }
                             PosterSliderRow("Ketebalan 3D", config.thickness3dPct, 0f..1f) { config = config.copy(thickness3dPct = it) }
                             PosterSliderRow("Transparansi Kartu", config.cardAlpha, 0.45f..1f) { config = config.copy(cardAlpha = it) }
                             PosterSliderRow("Kebulatan Sudut", config.cardCornerPct, 0f..1f) { config = config.copy(cardCornerPct = it) }
                         }
 
                         PosterTab.EFFECTS -> {
-                            PosterSliderRow("Kilau Sudut", config.lensFlarePct, 0f..1f) { config = config.copy(lensFlarePct = it) }
-                            PosterSliderRow("Bayangan 3D", config.shadow3dPct, 0f..1f) { config = config.copy(shadow3dPct = it) }
-                            PosterSliderRow("Vignette", config.vignettePct, 0f..1f) { config = config.copy(vignettePct = it) }
-                            PosterSliderRow("Film Grain", config.filmGrainPct, 0f..0.8f) { config = config.copy(filmGrainPct = it) }
+                            // Upgrade #2: Giant Depth Typography Behind Head Controls
+                            PosterSwitchRow("Teks Raksasa di Belakang Kepala", config.depthText.enabled) { en ->
+                                val defaultTxt = config.depthText.text.ifBlank {
+                                    selectedTracks.firstOrNull()?.title?.uppercase() ?: "SPOTYFLOW"
+                                }
+                                config = config.copy(depthText = config.depthText.copy(enabled = en, text = defaultTxt))
+                                if (en) selectedObject = SelectedPosterObject.DepthText
+                            }
+
+                            if (config.depthText.enabled) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(7.dp), modifier = Modifier.fillMaxWidth()) {
+                                    ActionStudioChip(
+                                        label = "Judul Lagu",
+                                        highlighted = false,
+                                        onClick = {
+                                            val t = selectedTracks.firstOrNull()?.title?.uppercase() ?: "SPOTYFLOW"
+                                            config = config.copy(depthText = config.depthText.copy(text = t))
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    ActionStudioChip(
+                                        label = "Ambil Lirik",
+                                        highlighted = true,
+                                        onClick = { openLyricLinePicker() },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    ActionStudioChip(
+                                        label = "Ketik Sendiri",
+                                        highlighted = false,
+                                        onClick = {
+                                            customTextDraft = config.depthText.text
+                                            showCustomTextDialog = true
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                    items(PosterFontStyle.entries) { fs ->
+                                        QuickStudioPill(fs.label, config.depthText.fontStyle == fs) {
+                                            config = config.copy(depthText = config.depthText.copy(fontStyle = fs))
+                                        }
+                                    }
+                                }
+
+                                Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                    DepthTextColorMode.entries.forEach { cm ->
+                                        QuickStudioPill(cm.label, config.depthText.colorMode == cm) {
+                                            config = config.copy(depthText = config.depthText.copy(colorMode = cm))
+                                        }
+                                    }
+                                }
+
+                                PosterSwitchRow("Teks di Belakang Objek", config.depthText.behindSubject) { b ->
+                                    config = config.copy(depthText = config.depthText.copy(behindSubject = b))
+                                }
+                                PosterSliderRow("Ukuran Teks", config.depthText.scale, 0.5f..2.1f) { v ->
+                                    config = config.copy(depthText = config.depthText.copy(scale = v))
+                                }
+                                PosterSliderRow("Posisi Teks Y", config.depthText.posY, 0.10f..0.88f) { v ->
+                                    config = config.copy(depthText = config.depthText.copy(posY = v))
+                                }
+                                PosterSliderRow("Transparansi Teks", config.depthText.opacity, 0.2f..1.0f, pctDisplay = true) { v ->
+                                    config = config.copy(depthText = config.depthText.copy(opacity = v))
+                                }
+                            }
+
+                            // Upgrade #7: Also accessible directly inside Tab Efek
+                            PosterSwitchRow("Tetesan Air Kaca di Kartu", config.cardWaterDrops) {
+                                config = config.copy(cardWaterDrops = it)
+                            }
+                            PosterSliderRow("Kilau Sudut", config.lensFlarePct, 0f..1f, pctDisplay = true) { config = config.copy(lensFlarePct = it) }
+                            PosterSliderRow("Bayangan 3D", config.shadow3dPct, 0f..1f, pctDisplay = true) { config = config.copy(shadow3dPct = it) }
+                            PosterSliderRow("Vignette", config.vignettePct, 0f..1f, pctDisplay = true) { config = config.copy(vignettePct = it) }
+                            PosterSliderRow("Film Grain", config.filmGrainPct, 0f..0.8f, pctDisplay = true) { config = config.copy(filmGrainPct = it) }
                             Text("Latar Studio (Tanpa Foto)", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = SpotyColors.Slate900)
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 items(PosterBgPreset.entries) { bg ->
-                                    QuickStudioPill(
-                                        label = bg.label,
-                                        selected = config.bgPreset == bg,
-                                        onClick = { config = config.copy(bgPreset = bg) }
-                                    )
+                                    QuickStudioPill(bg.label, config.bgPreset == bg) {
+                                        config = config.copy(bgPreset = bg)
+                                    }
                                 }
                             }
                         }
@@ -808,12 +1059,7 @@ fun Poster3DStudioScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(
-                                    text = "${config.stickers.size} dari 30 stiker",
-                                    fontSize = 12.5.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = SpotyColors.Slate500
-                                )
+                                Text("${config.stickers.size} dari 30 stiker", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = SpotyColors.Slate500)
                                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                     if (config.stickers.isNotEmpty()) {
                                         QuickStudioPill("Hapus terakhir", false) {
@@ -837,7 +1083,7 @@ fun Poster3DStudioScreen(
                                                 yFrac = 0.16f + Random.nextFloat() * 0.35f
                                             )
                                             config = config.copy(stickers = config.stickers + st)
-                                            selectedStickerId = st.id
+                                            selectedObject = SelectedPosterObject.Sticker(st.id)
                                         }
                                     }
                                 }
@@ -861,31 +1107,28 @@ fun Poster3DStudioScreen(
                                                             customFilePath = f.absolutePath
                                                         )
                                                         config = config.copy(stickers = config.stickers + st)
-                                                        selectedStickerId = st.id
+                                                        selectedObject = SelectedPosterObject.Sticker(st.id)
                                                     }
                                                 },
                                             contentAlignment = Alignment.Center
                                         ) {
                                             if (bmp != null) {
-                                                Image(
-                                                    bitmap = bmp.asImageBitmap(),
-                                                    contentDescription = "Stiker kustom",
-                                                    modifier = Modifier.fillMaxSize().padding(4.dp)
-                                                )
+                                                Image(bitmap = bmp.asImageBitmap(), contentDescription = "Stiker kustom", modifier = Modifier.fillMaxSize().padding(4.dp))
                                             }
                                         }
                                     }
                                 }
                             }
 
-                            val activeSt = config.stickers.firstOrNull { it.id == selectedStickerId } ?: config.stickers.lastOrNull()
+                            val activeStId = (selectedObject as? SelectedPosterObject.Sticker)?.id
+                            val activeSt = config.stickers.firstOrNull { it.id == activeStId } ?: config.stickers.lastOrNull()
                             if (activeSt != null) {
                                 PosterSwitchRow("Taruh stiker di belakang objek", activeSt.behindSubject) { behind ->
                                     config = config.copy(
                                         stickers = config.stickers.map { if (it.id == activeSt.id) it.copy(behindSubject = behind) else it }
                                     )
                                 }
-                                PosterSliderRow("Ukuran stiker", activeSt.scale, 0.5f..2.2f) { sc ->
+                                PosterSliderRow("Ukuran stiker", activeSt.scale, 0.45f..2.2f) { sc ->
                                     config = config.copy(
                                         stickers = config.stickers.map { if (it.id == activeSt.id) it.copy(scale = sc) else it }
                                     )
@@ -958,6 +1201,169 @@ fun Poster3DStudioScreen(
             }
         )
     }
+
+    // Upgrade #2: 1-Tap Lyric Picker Dialog (from LyricsRepository)
+    if (showLyricPicker) {
+        AlertDialog(
+            onDismissRequest = { showLyricPicker = false },
+            containerColor = Color.White,
+            title = { Text("Pilih 1-2 Baris Lirik Favorit", fontWeight = FontWeight.ExtraBold, color = SpotyColors.Slate900) },
+            text = {
+                when {
+                    isFetchingLyrics -> {
+                        Box(modifier = Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = SpotyColors.EmeraldCrystal)
+                        }
+                    }
+                    fetchedLyricLines.isEmpty() -> {
+                        Text("Lirik tidak ditemukan untuk lagu ini. Gunakan Ketik Sendiri untuk menulis teks estetikmu.", fontSize = 13.sp, color = SpotyColors.Slate500)
+                    }
+                    else -> {
+                        LazyColumn(
+                            modifier = Modifier.heightIn(max = 340.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            itemsIndexed(fetchedLyricLines) { idx, line ->
+                                val nextLine = fetchedLyricLines.getOrNull(idx + 1)?.text.orEmpty()
+                                val twoLines = if (nextLine.isNotBlank()) "${line.text}\n$nextLine" else line.text
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(SpotyColors.Slate900.copy(alpha = 0.05f))
+                                        .clickable {
+                                            config = config.copy(
+                                                depthText = config.depthText.copy(enabled = true, text = twoLines.uppercase())
+                                            )
+                                            selectedObject = SelectedPosterObject.DepthText
+                                            showLyricPicker = false
+                                        }
+                                        .padding(10.dp)
+                                ) {
+                                    Text(line.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = SpotyColors.Slate900)
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLyricPicker = false }) { Text("Tutup", color = SpotyColors.Slate500) }
+            }
+        )
+    }
+
+    // Upgrade #2: Custom Depth Text Dialog
+    if (showCustomTextDialog) {
+        AlertDialog(
+            onDismissRequest = { showCustomTextDialog = false },
+            containerColor = Color.White,
+            title = { Text("Ketik Teks Raksasa", fontWeight = FontWeight.ExtraBold, color = SpotyColors.Slate900) },
+            text = {
+                OutlinedTextField(
+                    value = customTextDraft,
+                    onValueChange = { customTextDraft = it },
+                    placeholder = { Text("Tulis judul atau potongan lirik...") },
+                    maxLines = 3,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (customTextDraft.isNotBlank()) {
+                        config = config.copy(
+                            depthText = config.depthText.copy(enabled = true, text = customTextDraft.trim())
+                        )
+                        selectedObject = SelectedPosterObject.DepthText
+                    }
+                    showCustomTextDialog = false
+                }) { Text("Terapkan", fontWeight = FontWeight.Bold, color = SpotyColors.DeepEmerald) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCustomTextDialog = false }) { Text("Batal", color = SpotyColors.Slate500) }
+            }
+        )
+    }
+}
+
+@Composable
+private fun ContextualLayerBar(
+    selectedObject: SelectedPosterObject,
+    config: PosterStudioConfig,
+    tracks: List<TrackItem>,
+    onToggleCardLayer: (Int) -> Unit,
+    onToggleTextLayer: () -> Unit,
+    onToggleStickerLayer: (String) -> Unit
+) {
+    val label: String
+    val isInFront: Boolean
+    val onToggle: () -> Unit
+
+    when (selectedObject) {
+        is SelectedPosterObject.Card -> {
+            val card = config.cards.getOrNull(selectedObject.index) ?: return
+            val track = tracks.firstOrNull { it.id == card.trackId } ?: tracks.getOrNull(selectedObject.index)
+            label = "Kartu #${selectedObject.index + 1}: ${track?.title ?: "Lagu"}"
+            isInFront = card.inFrontOfSubject
+            onToggle = { onToggleCardLayer(selectedObject.index) }
+        }
+        SelectedPosterObject.DepthText -> {
+            if (!config.depthText.enabled) return
+            label = "Teks 3D"
+            isInFront = !config.depthText.behindSubject
+            onToggle = onToggleTextLayer
+        }
+        is SelectedPosterObject.Sticker -> {
+            val st = config.stickers.firstOrNull { it.id == selectedObject.id } ?: return
+            label = "Stiker: ${st.kind?.label ?: "Kustom"}"
+            isInFront = !st.behindSubject
+            onToggle = { onToggleStickerLayer(st.id) }
+        }
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 3.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(SpotyColors.Slate900.copy(alpha = 0.055f))
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            fontSize = 11.5.sp,
+            fontWeight = FontWeight.Bold,
+            color = SpotyColors.Slate900,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(999.dp))
+                .background(if (isInFront) SpotyColors.Slate900 else SpotyColors.EmeraldCrystal)
+                .clickable(onClick = onToggle)
+                .padding(horizontal = 10.dp, vertical = 5.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Icon(
+                    imageVector = if (isInFront) Icons.Rounded.FlipToFront else Icons.Rounded.FlipToBack,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(13.dp)
+                )
+                Text(
+                    text = if (isInFront) "Depan Objek" else "Belakang Objek",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+            }
+        }
+    }
 }
 
 private fun savePosterPngToGallery(context: Context, bmp: Bitmap): Uri? {
@@ -999,17 +1405,27 @@ private fun BrushPill(label: String, active: Boolean, activeColor: Color, onClic
 }
 
 @Composable
-private fun QuickStudioPill(label: String, selected: Boolean, onClick: () -> Unit) {
+private fun QuickStudioPill(
+    label: String,
+    selected: Boolean,
+    accentFill: Boolean = false,
+    onClick: () -> Unit
+) {
+    val bg = when {
+        selected -> SpotyColors.EmeraldCrystal
+        accentFill -> SpotyColors.Slate900.copy(alpha = 0.085f)
+        else -> SpotyColors.Slate900.copy(alpha = 0.065f)
+    }
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(999.dp))
-            .background(if (selected) SpotyColors.EmeraldCrystal else SpotyColors.Slate900.copy(alpha = 0.07f))
+            .background(bg)
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 7.dp)
+            .padding(horizontal = 11.dp, vertical = 6.dp)
     ) {
         Text(
             text = label,
-            fontSize = 12.sp,
+            fontSize = 11.5.sp,
             fontWeight = FontWeight.Bold,
             color = if (selected) Color.White else SpotyColors.Slate900
         )
@@ -1028,7 +1444,7 @@ private fun ActionStudioChip(
             .clip(RoundedCornerShape(14.dp))
             .background(if (highlighted) SpotyColors.EmeraldCrystal else SpotyColors.Slate900.copy(alpha = 0.07f))
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 9.dp),
+            .padding(horizontal = 9.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
@@ -1047,12 +1463,14 @@ private fun PosterSliderRow(
     label: String,
     value: Float,
     range: ClosedFloatingPointRange<Float>,
+    pctDisplay: Boolean = false,
     onChange: (Float) -> Unit
 ) {
     Column {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(label, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = SpotyColors.Slate900)
-            Text(String.format(java.util.Locale.US, "%.2f", value), fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = SpotyColors.DeepEmerald)
+            Text(label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = SpotyColors.Slate900)
+            val txt = if (pctDisplay) "${(value * 100f).toInt()}%" else String.format(java.util.Locale.US, "%.2f", value)
+            Text(txt, fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = SpotyColors.DeepEmerald)
         }
         Slider(
             value = value.coerceIn(range.start, range.endInclusive),

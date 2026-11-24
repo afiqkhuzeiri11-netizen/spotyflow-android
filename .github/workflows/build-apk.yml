@@ -49,14 +49,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-apk
-          name: SpotyFlow Native v2.0.0
+          name: SpotyFlow Native v2.1.0
           body: |
-            SpotyFlow 100% Native Android (Final v2.0.0-native, Build 4) — Pure White x Full Liquid Glass 120 FPS + Real Water Drops Navbar + 100% Auralys Features.
-            - Custom Dynamic Island Pro via AccessibilityService (6 Styles + Live Synced Lyrics + Camera-Cutout Calibration + Live Preview)
-            - Full 10-Category Settings, Hardware 5-Band Equalizer & Loudness FX, Skip Silence, Varispeed, Crossfade, Sleep Timer & Music Alarm
-            - Full Offline M4A Download Engine (Priority #0 0ms playback), Device MediaStore Audio Scanner, Spotify/YTM Playlist Importer & .json Backup
-            - Poster Lagu 3D Depth Effect Studio (100% Offline ML Kit Selfie Segmentation + 4-Layer Pixel-Aligned Depth Sandwich + Manual Refine Brush + Full HD PNG Gallery Save)
-            - 5 Dynamic Liquid Glass Home Screen Widgets (1x1, 2x2, 2x4, 4x1, 4x2) + Interactive Widget Settings Live Preview
+            SpotyFlow 100% Native Android (v2.1.0-native, Build 5) — Poster Lagu 3D Pro Upgrade!
+            - Upgrade #1: True Colored Inner Rim Light hugging subject hair, face & shoulders
+            - Upgrade #2: Giant Depth Typography behind head (3 fonts + 1-tap lyric line picker)
+            - Upgrade #3: Per-card 5-layer Front/Back subject depth layering
+            - Upgrade #4: 6 Cinematic Photo Color Filters including viral B&W Color-Pop
+            - Upgrade #5: 2-Finger Pinch-to-Zoom & Rotate + 1-Finger Drag on Live Preview
+            - Upgrade #6: 5 1-Tap Pro Presets (Mirror Selfie 3D, Color-Pop B&W, Sampul Majalah, Kolase 4 Lagu, Pure White Crystal)
+            - Upgrade #7: 4-Layer Optical Glass Water Drops on 3D Music Cards
           files: SpotyFlow.apk
           make_latest: true
         env:

@@ -4,10 +4,14 @@ import android.graphics.Bitmap
 import android.graphics.Camera
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
@@ -54,6 +58,52 @@ enum class PosterBgPreset(val label: String, val topArgb: Int, val botArgb: Int)
     CUSTOM("Warna Kustom", 0xFF10B981.toInt(), 0xFF0F172A.toInt())
 }
 
+// Upgrade #2: Giant Depth Typography Enums & Model
+enum class PosterFontStyle(val label: String) {
+    BOLD_SANS("Bold Sans"),
+    EDITORIAL_SERIF("Editorial Serif"),
+    ITALIC_CONDENSED("Italic Condensed")
+}
+
+enum class DepthTextColorMode(val label: String) {
+    AUTO_WHITE("Putih"),
+    BLACK("Hitam"),
+    COVER_COLOR("Warna Sampul")
+}
+
+data class DepthTypographyConfig(
+    val enabled: Boolean = false,
+    val text: String = "",
+    val fontStyle: PosterFontStyle = PosterFontStyle.BOLD_SANS,
+    val behindSubject: Boolean = true,
+    val scale: Float = 1.0f,
+    val posX: Float = 0.5f,
+    val posY: Float = 0.24f,
+    val rotationDeg: Float = 0f,
+    val opacity: Float = 0.92f,
+    val colorMode: DepthTextColorMode = DepthTextColorMode.AUTO_WHITE,
+    val letterSpacing: Float = -0.02f
+)
+
+// Upgrade #4: 6 Cinematic Photo Color Filters (including viral B&W Color-Pop)
+enum class PhotoColorFilter(val label: String) {
+    ORIGINAL("Asli"),
+    FILM_ANALOG("Film Analog"),
+    MOODY_DARK("Moody Gelap"),
+    SOFT_CLEAN("Soft Clean"),
+    BW_COLOR_POP("B&W Color-Pop"),
+    COOL_MIDNIGHT("Cool Midnight")
+}
+
+// Upgrade #6: 5 One-Tap Pro Presets
+enum class PosterProPreset(val label: String) {
+    MIRROR_SELFIE_3D("Mirror Selfie 3D"),
+    COLOR_POP_BW("Color-Pop B&W"),
+    MAGAZINE_COVER("Sampul Majalah"),
+    COLLAGE_4_SONGS("Kolase 4 Lagu"),
+    PURE_WHITE_CRYSTAL("Pure White Crystal")
+}
+
 enum class BuiltInStickerKind(val label: String) {
     BIRD("Burung"),
     SPARKLE("Kilau"),
@@ -73,7 +123,8 @@ data class PosterCardTransform(
     val rotateYDeg: Float = -18f,
     val rotateXDeg: Float = 6f,
     val rotateZDeg: Float = -8f,
-    val scale: Float = 1.0f
+    val scale: Float = 1.0f,
+    val inFrontOfSubject: Boolean = false // Upgrade #3: Per-card Front/Back Layering
 )
 
 data class PosterStickerItem(
@@ -98,6 +149,10 @@ data class PosterStudioConfig(
     val photoZoom: Float = 1.0f,
     val photoPanX: Float = 0f,
     val photoPanY: Float = 0f,
+    val photoFilter: PhotoColorFilter = PhotoColorFilter.ORIGINAL, // Upgrade #4
+    val rimLightPct: Float = 0.45f, // Upgrade #1 (default 45%)
+    val depthText: DepthTypographyConfig = DepthTypographyConfig(), // Upgrade #2
+    val cardWaterDrops: Boolean = false, // Upgrade #7
     val bgPreset: PosterBgPreset = PosterBgPreset.PURE_WHITE_PEARL,
     val customBgArgb: Int = 0xFF10B981.toInt(),
     val formation: PosterFormation = PosterFormation.MIRROR_SHOULDERS,
@@ -123,13 +178,238 @@ data class PosterStudioConfig(
 )
 
 /**
- * 4-Layer Depth Sandwich Renderer (100% Pixel-Aligned):
- *   Layer 1: Full original photo (using photoMatrix) OR studio gradient
- *   Layer 2: 1-5 True 3D perspective Music Cards via android.graphics.Camera (+ 5-layer extrusion, glow, lens flare)
- *   Layer 3: Full-HD transparent subject cutout (using IDENTICAL photoMatrix -> 0px misalignment!)
- *   Layer 4: HD vector stickers & custom PNG stickers + SpotyFlow watermark
+ * 5-Layer Pro Depth Sandwich Renderer (100% Pixel-Aligned & Cached for 60-120 FPS):
+ *   Layer 1: Full original photo (+ PhotoColorFilter + Blur + Dim) OR studio gradient
+ *   Layer 2: Giant Depth Typography (if behindSubject) + 3D Music Cards with inFrontOfSubject == false
+ *   Layer 3: Full-HD transparent subject cutout (+ IDENTICAL photoMatrix & PhotoColorFilter) + Colored Rim Light (SCREEN)
+ *   Layer 3.5: 3D Music Cards with inFrontOfSubject == true + Giant Depth Typography (if !behindSubject)
+ *   Layer 4: Front stickers (honoring sticker.behindSubject) + Vignette + Film Grain + SpotyFlow Watermark
  */
 object Poster3DRenderer {
+
+    // Small bounded flat-card face cache so 2-finger pinch/rotate/pan never redraws 340x524 faces every frame
+    private val flatCardCache = LinkedHashMap<String, Bitmap>(16, 0.75f, true)
+    private const val MAX_FLAT_CARD_CACHE = 12
+
+    @Synchronized
+    fun clearFlatCardCache() {
+        flatCardCache.clear()
+    }
+
+    @Synchronized
+    private fun getOrBuildFlatCard(
+        track: TrackItem,
+        coverBmp: Bitmap?,
+        config: PosterStudioConfig,
+        accentArgb: Int
+    ): Bitmap {
+        val coverId = if (coverBmp != null && !coverBmp.isRecycled) System.identityHashCode(coverBmp) else 0
+        val key = "${track.id}|$coverId|${config.cardStyle.name}|${(config.cardCornerPct * 100).toInt()}|" +
+            "${config.showCover}|${config.showTitleArtist}|${config.showSeekbar}|${config.showControls}|" +
+            "${config.cardWaterDrops}|$accentArgb"
+        val cached = flatCardCache[key]
+        if (cached != null && !cached.isRecycled) return cached
+
+        val built = renderFlatMusicCard(340, 524, track, coverBmp, config, accentArgb)
+        flatCardCache[key] = built
+        if (flatCardCache.size > MAX_FLAT_CARD_CACHE) {
+            val eldestKey = flatCardCache.entries.firstOrNull()?.key
+            if (eldestKey != null && eldestKey != key) {
+                flatCardCache.remove(eldestKey)
+            }
+        }
+        return built
+    }
+
+    fun applyProPreset(
+        current: PosterStudioConfig,
+        preset: PosterProPreset,
+        tracks: List<TrackItem>
+    ): PosterStudioConfig {
+        val leadTitle = tracks.firstOrNull()?.title?.uppercase() ?: "SPOTYFLOW"
+        return when (preset) {
+            PosterProPreset.MIRROR_SELFIE_3D -> current.copy(
+                formation = PosterFormation.MIRROR_SHOULDERS,
+                cards = defaultCardsForFormation(tracks, PosterFormation.MIRROR_SHOULDERS).map { it.copy(inFrontOfSubject = false) },
+                rimLightPct = 0.55f,
+                lensFlarePct = 0.75f,
+                bgDimPct = 0.18f,
+                vignettePct = 0.20f,
+                photoFilter = PhotoColorFilter.ORIGINAL,
+                cardWaterDrops = false,
+                globalRotateY = 0f,
+                globalRotateX = 0f,
+                globalRotateZ = 0f,
+                depthText = current.depthText.copy(enabled = false)
+            )
+            PosterProPreset.COLOR_POP_BW -> current.copy(
+                photoFilter = PhotoColorFilter.BW_COLOR_POP,
+                cards = defaultCardsForFormation(tracks, current.formation).map { it.copy(inFrontOfSubject = false) },
+                cardStyle = PosterCardStyle.LIQUID_GLASS,
+                rimLightPct = 0.75f,
+                cardGlowPct = 0.55f,
+                vignettePct = 0.45f,
+                lensFlarePct = 0.80f,
+                bgDimPct = 0.16f,
+                depthText = current.depthText.copy(enabled = false)
+            )
+            PosterProPreset.MAGAZINE_COVER -> {
+                val baseCards = defaultCardsForFormation(tracks, PosterFormation.MIRROR_SHOULDERS).mapIndexed { idx, c ->
+                    if (idx == 0) {
+                        c.copy(
+                            centerXFrac = 0.74f,
+                            centerYFrac = 0.76f,
+                            rotateYDeg = -14f,
+                            rotateXDeg = 4f,
+                            rotateZDeg = 4f,
+                            scale = 0.76f,
+                            inFrontOfSubject = true
+                        )
+                    } else {
+                        c.copy(inFrontOfSubject = false)
+                    }
+                }
+                current.copy(
+                    photoFilter = PhotoColorFilter.FILM_ANALOG,
+                    rimLightPct = 0.42f,
+                    bgDimPct = 0.14f,
+                    vignettePct = 0.28f,
+                    cardWaterDrops = false,
+                    globalRotateY = 0f,
+                    globalRotateX = 0f,
+                    globalRotateZ = 0f,
+                    cards = baseCards,
+                    depthText = DepthTypographyConfig(
+                        enabled = true,
+                        text = leadTitle,
+                        fontStyle = PosterFontStyle.EDITORIAL_SERIF,
+                        behindSubject = true,
+                        scale = 1.12f,
+                        posX = 0.5f,
+                        posY = 0.22f,
+                        rotationDeg = 0f,
+                        opacity = 0.94f,
+                        colorMode = DepthTextColorMode.AUTO_WHITE
+                    )
+                )
+            }
+            PosterProPreset.COLLAGE_4_SONGS -> current.copy(
+                formation = PosterFormation.COLLAGE,
+                cards = defaultCardsForFormation(tracks, PosterFormation.COLLAGE).map { it.copy(inFrontOfSubject = false) },
+                shadow3dPct = 0.75f,
+                lensFlarePct = 0.70f,
+                globalRotateY = 20f,
+                globalRotateX = 0f,
+                globalRotateZ = 0f,
+                photoFilter = PhotoColorFilter.MOODY_DARK,
+                rimLightPct = 0.50f,
+                bgDimPct = 0.22f,
+                depthText = current.depthText.copy(enabled = false)
+            )
+            PosterProPreset.PURE_WHITE_CRYSTAL -> current.copy(
+                cardStyle = PosterCardStyle.CRYSTAL_LIGHT,
+                photoFilter = PhotoColorFilter.SOFT_CLEAN,
+                bgPreset = PosterBgPreset.PURE_WHITE_PEARL,
+                cardWaterDrops = true,
+                rimLightPct = 0.40f,
+                bgDimPct = 0.05f,
+                vignettePct = 0.10f,
+                lensFlarePct = 0.65f,
+                globalRotateY = 0f,
+                globalRotateX = 0f,
+                globalRotateZ = 0f
+            )
+        }
+    }
+
+    /**
+     * Upgrade #4: 6 Cinematic Photo Color Filters built with pure Android ColorMatrix.
+     * Applied strictly to Layer 1 (Original Photo) & Layer 3 (Subject Cutout) — NEVER to 3D Music Cards or Rim Light!
+     */
+    fun buildPhotoColorFilter(filter: PhotoColorFilter): ColorMatrixColorFilter? {
+        return when (filter) {
+            PhotoColorFilter.ORIGINAL -> null
+            PhotoColorFilter.FILM_ANALOG -> {
+                val cm = ColorMatrix()
+                cm.setSaturation(0.90f)
+                // Warm red/yellow analog lift + gentle faded shadows
+                val warmFade = ColorMatrix(
+                    floatArrayOf(
+                        1.05f, 0.02f, 0f, 0f, 8f,
+                        0f, 1.01f, 0f, 0f, 5f,
+                        0f, 0f, 0.93f, 0f, 4f,
+                        0f, 0f, 0f, 1f, 0f
+                    )
+                )
+                cm.postConcat(warmFade)
+                ColorMatrixColorFilter(cm)
+            }
+            PhotoColorFilter.MOODY_DARK -> {
+                val cm = ColorMatrix()
+                cm.setSaturation(0.85f)
+                val c = 1.18f
+                val t = (-0.5f * c + 0.5f) * 255f - 18f
+                val darkMood = ColorMatrix(
+                    floatArrayOf(
+                        c * 0.97f, 0f, 0f, 0f, t,
+                        0f, c * 0.99f, 0f, 0f, t,
+                        0f, 0f, c * 1.04f, 0f, t + 6f,
+                        0f, 0f, 0f, 1f, 0f
+                    )
+                )
+                cm.postConcat(darkMood)
+                ColorMatrixColorFilter(cm)
+            }
+            PhotoColorFilter.SOFT_CLEAN -> {
+                val cm = ColorMatrix()
+                cm.setSaturation(1.04f)
+                val c = 0.95f
+                val t = (-0.5f * c + 0.5f) * 255f + 12f
+                val clean = ColorMatrix(
+                    floatArrayOf(
+                        c, 0f, 0f, 0f, t,
+                        0f, c, 0f, 0f, t,
+                        0f, 0f, c, 0f, t,
+                        0f, 0f, 0f, 1f, 0f
+                    )
+                )
+                cm.postConcat(clean)
+                ColorMatrixColorFilter(cm)
+            }
+            PhotoColorFilter.BW_COLOR_POP -> {
+                val cm = ColorMatrix()
+                cm.setSaturation(0f)
+                val c = 1.22f
+                val t = (-0.5f * c + 0.5f) * 255f
+                val crispBw = ColorMatrix(
+                    floatArrayOf(
+                        c, 0f, 0f, 0f, t,
+                        0f, c, 0f, 0f, t,
+                        0f, 0f, c, 0f, t,
+                        0f, 0f, 0f, 1f, 0f
+                    )
+                )
+                cm.postConcat(crispBw)
+                ColorMatrixColorFilter(cm)
+            }
+            PhotoColorFilter.COOL_MIDNIGHT -> {
+                val cm = ColorMatrix()
+                cm.setSaturation(0.88f)
+                val c = 1.12f
+                val t = (-0.5f * c + 0.5f) * 255f
+                val cool = ColorMatrix(
+                    floatArrayOf(
+                        c * 0.93f, 0f, 0f, 0f, t - 4f,
+                        0f, c * 0.99f, 0f, 0f, t + 3f,
+                        0f, 0f, c * 1.10f, 0f, t + 14f,
+                        0f, 0f, 0f, 1f, 0f
+                    )
+                )
+                cm.postConcat(cool)
+                ColorMatrixColorFilter(cm)
+            }
+        }
+    }
 
     fun defaultCardsForFormation(
         tracks: List<TrackItem>,
@@ -154,7 +434,8 @@ object Poster3DRenderer {
                         rotateYDeg = tpl.third[0],
                         rotateXDeg = tpl.third[1],
                         rotateZDeg = tpl.third[2],
-                        scale = tpl.third[3]
+                        scale = tpl.third[3],
+                        inFrontOfSubject = false
                     )
                 }
             }
@@ -168,7 +449,7 @@ object Poster3DRenderer {
                 )
                 tracks.take(5).mapIndexed { i, t ->
                     val c = coords[i % coords.size]
-                    PosterCardTransform(t.id, c[0], c[1], c[2], c[3], c[4], c[5])
+                    PosterCardTransform(t.id, c[0], c[1], c[2], c[3], c[4], c[5], inFrontOfSubject = false)
                 }
             }
             PosterFormation.FAN_3D -> {
@@ -182,7 +463,8 @@ object Poster3DRenderer {
                         rotateYDeg = -offset * 16f,
                         rotateXDeg = 6f,
                         rotateZDeg = offset * 10f,
-                        scale = (1.0f - kotlin.math.abs(offset) * 0.06f).coerceAtLeast(0.76f)
+                        scale = (1.0f - kotlin.math.abs(offset) * 0.06f).coerceAtLeast(0.76f),
+                        inFrontOfSubject = false
                     )
                 }
             }
@@ -196,15 +478,15 @@ object Poster3DRenderer {
                 )
                 tracks.take(5).mapIndexed { i, t ->
                     val (x, y) = pts[i % pts.size]
-                    PosterCardTransform(t.id, x, y, if (x < 0.5f) 10f else -10f, 4f, 0f, 0.84f)
+                    PosterCardTransform(t.id, x, y, if (x < 0.5f) 10f else -10f, 4f, 0f, 0.84f, inFrontOfSubject = false)
                 }
             }
         }
     }
 
     /**
-     * Single shared centerCrop matrix used by BOTH Layer 1 (Original Photo) and Layer 3 (Cutout)
-     * so subject edges never drift by even 1 pixel.
+     * Single shared centerCrop matrix used identically by Layer 1 (Original Photo),
+     * Layer 3 (Subject Cutout), and Colored Rim Light so alignment is 1:1 pixel-exact.
      */
     fun computeCenterCropMatrix(
         photoW: Int,
@@ -236,6 +518,7 @@ object Poster3DRenderer {
         customStickerBitmaps: Map<String, Bitmap>,
         uprightFullPhoto: Bitmap?,
         cutoutBmp: Bitmap?,
+        rimLightOverlayBmp: Bitmap?,
         dominantAccentArgb: Int
     ): Bitmap {
         val out = Bitmap.createBitmap(canvasW, canvasH, Bitmap.Config.ARGB_8888)
@@ -255,8 +538,10 @@ object Poster3DRenderer {
             null
         }
 
+        val photoColorFilter = buildPhotoColorFilter(config.photoFilter)
+
         // =====================================================================
-        // LAYER 1: FULL ORIGINAL PHOTO BACKGROUND OR STUDIO GRADIENT
+        // LAYER 1: FULL ORIGINAL PHOTO BACKGROUND (+ Color Filter + Blur + Dim)
         // =====================================================================
         if (uprightFullPhoto != null && sharedPhotoMatrix != null) {
             val bgSource = if (config.bgBlurPct > 0.03f) {
@@ -264,7 +549,9 @@ object Poster3DRenderer {
             } else {
                 uprightFullPhoto
             }
-            val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+            val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                colorFilter = photoColorFilter
+            }
             canvas.drawBitmap(bgSource, sharedPhotoMatrix, bgPaint)
             if (bgSource !== uprightFullPhoto) bgSource.recycle()
 
@@ -275,14 +562,11 @@ object Poster3DRenderer {
             drawStudioBackground(canvas, canvasW, canvasH, config, dominantAccentArgb)
         }
 
-        // Stickers placed BEHIND subject
+        // Stickers behind subject
         config.stickers.filter { it.behindSubject }.forEach { st ->
             drawSticker(canvas, canvasW, canvasH, st, customStickerBitmaps)
         }
 
-        // =====================================================================
-        // LAYER 2: 1-5 TRUE 3D PERSPECTIVE MUSIC CARDS (BEHIND SUBJECT!)
-        // =====================================================================
         val cardList = if (config.cards.isNotEmpty()) {
             config.cards
         } else {
@@ -290,7 +574,15 @@ object Poster3DRenderer {
         }
         val trackById = tracks.associateBy { it.id }
 
+        // =====================================================================
+        // LAYER 2: GIANT DEPTH TYPOGRAPHY (behindSubject) + BACK 3D MUSIC CARDS
+        // =====================================================================
+        if (config.depthText.enabled && config.depthText.behindSubject) {
+            drawDepthTypography(canvas, canvasW, canvasH, config.depthText, dominantAccentArgb)
+        }
+
         cardList.forEachIndexed { idx, cardTf ->
+            if (cardTf.inFrontOfSubject) return@forEachIndexed
             val track = trackById[cardTf.trackId] ?: tracks.getOrNull(idx) ?: return@forEachIndexed
             val coverBmp = coverBitmaps[track.id] ?: coverBitmaps[track.videoId]
             drawProjected3DMusicCard(
@@ -306,20 +598,54 @@ object Poster3DRenderer {
         }
 
         // =====================================================================
-        // LAYER 3: FULL-HD TRANSPARENT SUBJECT CUTOUT OVERLAY (1:1 EXACT MATRIX!)
+        // LAYER 3: SUBJECT CUTOUT (IDENTICAL photoMatrix + ColorFilter) + RIM LIGHT
         // =====================================================================
         if (uprightFullPhoto != null && config.depthEnabled && cutoutBmp != null && !cutoutBmp.isRecycled && sharedPhotoMatrix != null) {
-            val subjectPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-            canvas.drawBitmap(cutoutBmp, sharedPhotoMatrix, subjectPaint)
-            // Keep subject slightly brighter than background if bgDimPct is high
-            if (config.bgDimPct > 0.25f) {
-                val gentleDim = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    alpha = ((config.bgDimPct * 0.30f) * 140f).toInt().coerceIn(0, 70)
-                }
-                canvas.saveLayer(0f, 0f, canvasW.toFloat(), canvasH.toFloat(), null)
-                canvas.drawBitmap(cutoutBmp, sharedPhotoMatrix, gentleDim)
-                canvas.restore()
+            val subjectPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                colorFilter = photoColorFilter
             }
+            canvas.drawBitmap(cutoutBmp, sharedPhotoMatrix, subjectPaint)
+
+            // Upgrade #1: True Colored Inner Rim Light hugging subject hair, cheeks, shoulders & hands
+            if (config.rimLightPct > 0.02f && rimLightOverlayBmp != null && !rimLightOverlayBmp.isRecycled) {
+                val rimMatrix = Matrix().apply {
+                    setScale(
+                        uprightFullPhoto.width.toFloat() / rimLightOverlayBmp.width.toFloat(),
+                        uprightFullPhoto.height.toFloat() / rimLightOverlayBmp.height.toFloat()
+                    )
+                    postConcat(sharedPhotoMatrix)
+                }
+                val layerId = canvas.saveLayer(0f, 0f, canvasW.toFloat(), canvasH.toFloat(), null)
+                val rimPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                    alpha = (config.rimLightPct * 255f).toInt().coerceIn(0, 255)
+                    xfermode = PorterDuffXfermode(PorterDuff.Mode.SCREEN)
+                }
+                canvas.drawBitmap(rimLightOverlayBmp, rimMatrix, rimPaint)
+                canvas.restoreToCount(layerId)
+            }
+        }
+
+        // =====================================================================
+        // LAYER 3.5: FRONT 3D MUSIC CARDS (inFrontOfSubject == true) + FRONT TEXT
+        // =====================================================================
+        cardList.forEachIndexed { idx, cardTf ->
+            if (!cardTf.inFrontOfSubject) return@forEachIndexed
+            val track = trackById[cardTf.trackId] ?: tracks.getOrNull(idx) ?: return@forEachIndexed
+            val coverBmp = coverBitmaps[track.id] ?: coverBitmaps[track.videoId]
+            drawProjected3DMusicCard(
+                canvas = canvas,
+                canvasW = canvasW,
+                canvasH = canvasH,
+                track = track,
+                coverBmp = coverBmp,
+                tf = cardTf,
+                config = config,
+                accentArgb = dominantAccentArgb
+            )
+        }
+
+        if (config.depthText.enabled && !config.depthText.behindSubject) {
+            drawDepthTypography(canvas, canvasW, canvasH, config.depthText, dominantAccentArgb)
         }
 
         // Vignette & Subtle Film Grain
@@ -389,6 +715,87 @@ object Poster3DRenderer {
         return out
     }
 
+    /**
+     * Upgrade #2: Giant Editorial Depth Typography behind/in front of subject.
+     */
+    private fun drawDepthTypography(
+        canvas: Canvas,
+        canvasW: Int,
+        canvasH: Int,
+        cfg: DepthTypographyConfig,
+        dominantAccentArgb: Int
+    ) {
+        val rawText = cfg.text.trim()
+        if (rawText.isBlank()) return
+
+        val tf = when (cfg.fontStyle) {
+            PosterFontStyle.BOLD_SANS -> Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            PosterFontStyle.EDITORIAL_SERIF -> Typeface.create(Typeface.SERIF, Typeface.BOLD)
+            PosterFontStyle.ITALIC_CONDENSED -> Typeface.create("sans-serif-condensed", Typeface.BOLD_ITALIC)
+        }
+        val baseColor = when (cfg.colorMode) {
+            DepthTextColorMode.AUTO_WHITE -> Color.WHITE
+            DepthTextColorMode.BLACK -> 0xFF0F172A.toInt()
+            DepthTextColorMode.COVER_COLOR -> blendArgb(dominantAccentArgb, Color.WHITE, 0.22f)
+        }
+        val alphaInt = (cfg.opacity * 255f).toInt().coerceIn(25, 255)
+        val baseSize = min(canvasW, canvasH) * 0.165f * cfg.scale.coerceIn(0.45f, 2.2f)
+
+        val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            typeface = tf
+            textSize = baseSize
+            letterSpacing = cfg.letterSpacing
+            textAlign = Paint.Align.CENTER
+            color = withAlpha(baseColor, alphaInt)
+            setShadowLayer(
+                baseSize * 0.14f,
+                0f,
+                baseSize * 0.05f,
+                if (cfg.colorMode == DepthTextColorMode.BLACK) 0x55FFFFFF else 0x66040710
+            )
+        }
+
+        // Split into clean editorial lines (max width ~92% canvas)
+        val maxLineW = canvasW * 0.92f
+        val lines = wrapEditorialLines(rawText, paint, maxLineW).take(4)
+        if (lines.isEmpty()) return
+
+        val lineHeight = baseSize * 1.04f
+        val totalHeight = lineHeight * lines.size
+        val cx = canvasW * cfg.posX
+        val cy = canvasH * cfg.posY
+
+        canvas.save()
+        canvas.translate(cx, cy)
+        canvas.rotate(cfg.rotationDeg)
+        var drawY = -totalHeight * 0.5f + baseSize * 0.82f
+        lines.forEach { line ->
+            canvas.drawText(line, 0f, drawY, paint)
+            drawY += lineHeight
+        }
+        canvas.restore()
+    }
+
+    private fun wrapEditorialLines(text: String, paint: TextPaint, maxW: Float): List<String> {
+        val result = mutableListOf<String>()
+        text.split("\n").forEach { paragraph ->
+            val words = paragraph.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+            if (words.isEmpty()) return@forEach
+            var cur = words.first()
+            for (i in 1 until words.size) {
+                val cand = "$cur ${words[i]}"
+                if (paint.measureText(cand) <= maxW) {
+                    cur = cand
+                } else {
+                    result.add(cur)
+                    cur = words[i]
+                }
+            }
+            result.add(cur)
+        }
+        return result
+    }
+
     private fun drawStudioBackground(
         canvas: Canvas,
         w: Int,
@@ -411,7 +818,6 @@ object Poster3DRenderer {
         }
         canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), paint)
 
-        // Soft ambient orb glow
         val orb = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             shader = RadialGradient(
                 w * 0.22f, h * 0.24f, w * 0.75f,
@@ -431,10 +837,9 @@ object Poster3DRenderer {
         config: PosterStudioConfig,
         accentArgb: Int
     ) {
-        // Precision 1 : 1.54 card bitmap (340 x 524)
         val cardW = 340
         val cardH = 524
-        val cardBmp = renderFlatMusicCard(cardW, cardH, track, coverBmp, config, accentArgb)
+        val cardBmp = getOrBuildFlatCard(track, coverBmp, config, accentArgb)
 
         val scaleFactor = (min(canvasW, canvasH) * 0.42f / cardW.toFloat()) *
             tf.scale * config.globalCardScale.coerceIn(0.6f, 1.5f)
@@ -459,7 +864,6 @@ object Poster3DRenderer {
             canvas.drawCircle(cx, cy, glowRadius, glowPaint)
         }
 
-        // Helper to build Camera 3D matrix at a given Z depth
         fun build3DMatrix(zOffset: Float, shiftX: Float = 0f, shiftY: Float = 0f): Matrix {
             val cam = Camera()
             val m = Matrix()
@@ -509,7 +913,7 @@ object Poster3DRenderer {
             canvas.restore()
         }
 
-        // 4. Front Face 3D Projected Music Card
+        // 4. Front Face 3D Projected Music Card (cached!)
         val frontMat = build3DMatrix(0f)
         val frontPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
             alpha = (config.cardAlpha * 255f).toInt().coerceIn(90, 255)
@@ -522,8 +926,6 @@ object Poster3DRenderer {
             frontMat.mapPoints(pt)
             drawOpticalLensFlare(canvas, pt[0], pt[1], cardW * scaleFactor * 0.24f * config.lensFlarePct)
         }
-
-        cardBmp.recycle()
     }
 
     private fun renderFlatMusicCard(
@@ -577,7 +979,6 @@ object Poster3DRenderer {
         val pad = 22f
         val coverSize = w - pad * 2f
 
-        // Cover Art
         if (config.showCover) {
             val coverRect = RectF(pad, pad, pad + coverSize, pad + coverSize)
             val clipPath = Path().apply { addRoundRect(coverRect, 20f, 20f, Path.Direction.CW) }
@@ -600,7 +1001,6 @@ object Poster3DRenderer {
         val textSecondary = if (isLight) 0xFF475569.toInt() else 0xB8FFFFFF.toInt()
         var cursorY = pad + coverSize + 34f
 
-        // Title + Artist + Vector Heart
         if (config.showTitleArtist) {
             val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = textPrimary
@@ -618,12 +1018,10 @@ object Poster3DRenderer {
             val ellipArtist = TextUtils.ellipsize(track.artist, artistPaint, w - pad * 2f - 36f, TextUtils.TruncateAt.END).toString()
             c.drawText(ellipArtist, pad, cursorY + 24f, artistPaint)
 
-            // Crisp vector heart on right
             drawVectorHeart(c, w - pad - 14f, cursorY + 4f, 11f, accentArgb)
             cursorY += 46f
         }
 
-        // Thin seekbar
         if (config.showSeekbar) {
             val barPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = if (isLight) 0x240F172A else 0x33FFFFFF
@@ -638,7 +1036,6 @@ object Poster3DRenderer {
             cursorY += 28f
         }
 
-        // Crisp vector playback controls (Prev / Pause / Next)
         if (config.showControls) {
             val ctrlY = min(cursorY + 26f, h - 42f)
             val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -646,10 +1043,7 @@ object Poster3DRenderer {
                 style = Paint.Style.FILL
             }
             val midX = w * 0.5f
-            // Play/Pause circle pill
-            val pillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = textPrimary
-            }
+            val pillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = textPrimary }
             c.drawCircle(midX, ctrlY, 22f, pillPaint)
             val barInside = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = if (isLight) Color.WHITE else 0xFF0F172A.toInt()
@@ -657,7 +1051,6 @@ object Poster3DRenderer {
             c.drawRoundRect(RectF(midX - 7f, ctrlY - 9f, midX - 2f, ctrlY + 9f), 2f, 2f, barInside)
             c.drawRoundRect(RectF(midX + 2f, ctrlY - 9f, midX + 7f, ctrlY + 9f), 2f, 2f, barInside)
 
-            // Prev vector triangle
             val prevX = midX - 66f
             val prevPath = Path().apply {
                 moveTo(prevX + 8f, ctrlY - 9f)
@@ -668,7 +1061,6 @@ object Poster3DRenderer {
             c.drawPath(prevPath, iconPaint)
             c.drawRect(prevX - 10f, ctrlY - 9f, prevX - 7f, ctrlY + 9f, iconPaint)
 
-            // Next vector triangle
             val nextX = midX + 66f
             val nextPath = Path().apply {
                 moveTo(nextX - 8f, ctrlY - 9f)
@@ -680,7 +1072,12 @@ object Poster3DRenderer {
             c.drawRect(nextX + 7f, ctrlY - 9f, nextX + 10f, ctrlY + 9f, iconPaint)
         }
 
-        // Silver/Neon Hairline Rim Border
+        // Upgrade #7: Signature SpotyFlow 4-Layer Optical Glass Water Drops on card edges/corners
+        // Drawn BEFORE 3D Camera projection so droplets tilt naturally in 3D space!
+        if (config.cardWaterDrops) {
+            drawCardOpticalWaterDrops(c, w.toFloat(), h.toFloat())
+        }
+
         val rimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeWidth = if (config.cardStyle == PosterCardStyle.NEON_FRAME) 3.6f else 2.2f
@@ -696,6 +1093,84 @@ object Poster3DRenderer {
         return bmp
     }
 
+    /**
+     * Upgrade #7: 6 Organic 4-Layer Optical Water Droplets along card glass edges/corners.
+     */
+    private fun drawCardOpticalWaterDrops(c: Canvas, w: Float, h: Float) {
+        // (xFrac, yFrac, rx, ry) carefully placed around margins/corners without obscuring title text
+        val drops = arrayOf(
+            floatArrayOf(0.085f, 0.065f, 11.5f, 9.8f),
+            floatArrayOf(0.145f, 0.112f, 6.2f, 5.8f),
+            floatArrayOf(0.915f, 0.088f, 13.5f, 11.2f),
+            floatArrayOf(0.892f, 0.625f, 9.5f, 8.2f),
+            floatArrayOf(0.075f, 0.875f, 10.8f, 9.2f),
+            floatArrayOf(0.910f, 0.905f, 12.2f, 10.4f)
+        )
+        for (d in drops) {
+            drawSingleOpticalWaterDrop(c, w * d[0], h * d[1], d[2], d[3])
+        }
+    }
+
+    private fun drawSingleOpticalWaterDrop(c: Canvas, cx: Float, cy: Float, rx: Float, ry: Float) {
+        val oval = RectF(cx - rx, cy - ry, cx + rx, cy + ry)
+
+        // Layer 1a: Soft curved shadow underneath lower-right edge
+        val shOval = RectF(oval.left + rx * 0.24f, oval.top + ry * 0.30f, oval.right + rx * 0.24f, oval.bottom + ry * 0.30f)
+        val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = RadialGradient(
+                cx + rx * 0.24f, cy + ry * 0.30f, max(rx, ry) * 1.35f,
+                intArrayOf(0x280F172A, 0x0A0F172A, Color.TRANSPARENT),
+                floatArrayOf(0f, 0.6f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        }
+        c.drawOval(shOval, shadowPaint)
+
+        // Layer 1b: Focused Caustic Light Dot (refracted light inside lower-right dome)
+        val causX = cx + rx * 0.34f
+        val causY = cy + ry * 0.38f
+        val causR = max(rx, ry) * 0.56f
+        val causticPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = RadialGradient(
+                causX, causY, causR,
+                intArrayOf(0xEBFFFFFF.toInt(), 0x78E0F2FE, Color.TRANSPARENT),
+                floatArrayOf(0f, 0.45f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        }
+        c.drawCircle(causX, causY, causR, causticPaint)
+
+        // Layer 2: Translucent 3D Refractive Dome Body
+        val domePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = LinearGradient(
+                oval.left, oval.top, oval.right, oval.bottom,
+                intArrayOf(0x1C0F172A, 0x26FFFFFF, 0x62FFFFFF),
+                floatArrayOf(0f, 0.45f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        }
+        c.drawOval(oval, domePaint)
+
+        // Layer 3: Pure-White Crisp Primary Specular Glint (upper-left) + Tiny Secondary Sparkle
+        val glintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xF5FFFFFF.toInt() }
+        c.drawCircle(cx - rx * 0.34f, cy - ry * 0.34f, (min(rx, ry) * 0.30f).coerceAtLeast(1.8f), glintPaint)
+        val secGlintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xD0FFFFFF.toInt() }
+        c.drawCircle(cx - rx * 0.08f, cy - ry * 0.48f, (min(rx, ry) * 0.14f).coerceAtLeast(1.0f), secGlintPaint)
+
+        // Layer 4: Thin Crisp Fresnel Rim Border
+        val rimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 1.1f
+            shader = LinearGradient(
+                oval.left, oval.top, oval.right, oval.bottom,
+                intArrayOf(0xE0FFFFFF.toInt(), 0x70BAE6FD, 0x200F172A, 0xC8FFFFFF.toInt()),
+                floatArrayOf(0f, 0.35f, 0.7f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        }
+        c.drawOval(oval, rimPaint)
+    }
+
     private fun drawOpticalLensFlare(canvas: Canvas, cx: Float, cy: Float, radius: Float) {
         if (radius <= 2f) return
         val core = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -708,7 +1183,6 @@ object Poster3DRenderer {
         }
         canvas.drawCircle(cx, cy, radius, core)
 
-        // Sharp 4-point star ray
         val star = Path().apply {
             moveTo(cx, cy - radius * 0.92f)
             quadTo(cx, cy, cx + radius * 0.92f, cy)
