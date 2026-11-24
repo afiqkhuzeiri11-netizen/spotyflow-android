@@ -192,7 +192,7 @@ object AppSettingsStore {
         }
         return JSONObject().apply {
             put("app", "SpotyFlow Native")
-            put("version", "2.5.0-native")
+            put("version", "2.6.0-native")
             put("exportedAt", System.currentTimeMillis())
             put("settings", settingsJson)
             put("library", libObj)

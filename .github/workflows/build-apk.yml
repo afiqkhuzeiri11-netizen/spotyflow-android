@@ -49,14 +49,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-apk
-          name: SpotyFlow Native v2.5.0
+          name: SpotyFlow Native v2.6.0
           body: |
-            SpotyFlow 100% Native Android (v2.5.0-native, Build 9) — Rombak Total Poster Lagu Depth Effect 4-Layer!
-            - Strict 4-Layer Behind-Object Depth Stack: 100% SEMUA sampul lagu (1-5 lagu) + teks besar dikunci di Layer 2 DI BELAKANG potongan objek transparan 1:1 (Layer 3)
-            - 3-Lapis AI Pemisah Objek Anti-Gagal: Google ML Kit Subject Segmentation (auto-download modul), ML Kit Selfie Segmentation Offline, + slot opsional Clipdrop API Key
-            - Matte Edge Refinement 4-Tahap (anti-gerigi, anti-bercak, anti-tembus badan, EXIF-safe upright photo, Cek Potongan checkerboard)
-            - Kartu Mini-Player Liquid Glass murni di Layer 4 tanpa thumbnail sampul depan (hanya judul, artis, progress bar adaptif, & ikon Play)
-            - Ekspor True 1080x1920 Full HD PNG anti-pecah langsung ke Pictures/SpotyFlow
+            SpotyFlow 100% Native Android (v2.6.0-native, Build 10)
+            - Restored classic Poster Lagu 3D Pro (all 7 Pro upgrades + original offline ML Kit Selfie Segmentation + Brush Refine + Checkerboard Cutout)
+            - Keeps YouTube Music Live Search Overlay (< 200ms Autocomplete + Infinite Scroll), HD Artist Banner, Full Album & Official Track Credits
+            - Pure White x Full Liquid Glass 120 FPS, Real Water Drops Navbar, Dynamic Island 6 Styles & 5 Home Widgets
           files: SpotyFlow.apk
           make_latest: true
         env:
