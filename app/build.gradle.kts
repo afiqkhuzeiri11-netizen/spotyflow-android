@@ -88,7 +88,8 @@ dependencies {
     implementation("com.github.teamnewpipe:NewPipeExtractor:v0.26.0")
     implementation("com.google.guava:guava:33.3.1-android")
 
-    // Super-Accurate General Object Segmentation (ML Kit Subject + Offline Selfie Fallback + EXIF)
+    // Super-Accurate General Object Background Removal (BRIA RMBG-1.4 Native ONNX + ML Kit Subject Fallback + EXIF)
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
     implementation("com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1")
     implementation("com.google.android.gms:play-services-base:18.5.0")
     implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")

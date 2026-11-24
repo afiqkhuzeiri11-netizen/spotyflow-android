@@ -1,5 +1,8 @@
 package com.spotyflow.android.poster
 
+import ai.onnxruntime.OnnxTensor
+import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -29,7 +32,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.io.File
+import java.io.FileOutputStream
+import java.nio.FloatBuffer
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -40,7 +50,7 @@ data class DepthCutoutResult(
     val maskHeight: Int,
     val coverage: Float,
     val hasSubject: Boolean,
-    val engineLabel: String = "ML Kit Subject AI"
+    val engineLabel: String = "BRIA RMBG-1.4 HD"
 )
 
 data class CutoutBundle(
@@ -49,22 +59,35 @@ data class CutoutBundle(
 )
 
 /**
- * Super-Accurate Auralys-Style Subject Cutter (v2.7.0-native):
- * ONLY cuts the real subject/object from the user's background photo (Layer 1) and overlays it
- * 1:1 pixel-aligned on Layer 3 so 3D music cards sit cleanly sandwiched in Layer 2!
+ * Super-Accurate Auralys-Style Background Remover (v2.9.0-native):
+ * - Layer 1 = Original Full Photo
+ * - Layer 2 = 3D Music Cards
+ * - Layer 3 = Exact Layer 1 photo with ONLY the background cleanly erased (1:1 pixel-aligned)!
  *
- * Dual-AI Pipeline:
- * 1. Primary: Google ML Kit Subject Segmentation (handles motorcycles, cars, people, pets, dark scenes!)
- *    with automatic ModuleInstallClient download for sideloaded APKs.
- * 2. Fallback: Offline Google ML Kit Selfie Segmentation (100% offline without Play Services).
- *
- * 4-Stage Studio Matte Refinement:
- * - Smoothstep S-curve (solid interior, clean 0x00000000 noise floor)
- * - 3x3 Morphological Speckle & Interior Pinhole Cleanup
- * - Connected-Component Solid Filter (kills disconnected shredded floating scraps!)
- * - 1-Pass Border-Only Anti-Aliasing + exact 1:1 (uprightPhoto.width, uprightPhoto.height) ARGB_8888 output
+ * Engine Hierarchy:
+ * 1. Primary: BRIA RMBG-1.4 (onnx/model_quantized.onnx, 44MB downloaded ONCE & cached forever)
+ *    running natively via ONNX Runtime C++ (4 threads) -> Studio remove.bg / Auralys accuracy!
+ * 2. Fallback: Google ML Kit Subject Segmentation (1024px)
+ * 3. Offline Fallback: ML Kit Selfie Segmentation
  */
 object SpotyFlowDepthEngine {
+
+    private const val RMBG_MODEL_URL =
+        "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_quantized.onnx"
+    private const val RMBG_FILE_NAME = "bria_rmbg_14_q8.onnx"
+    private const val RMBG_INPUT_SIZE = 1024
+
+    @Volatile
+    private var cachedOrtSession: OrtSession? = null
+
+    private val downloadClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(25, TimeUnit.SECONDS)
+            .readTimeout(90, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+    }
 
     suspend fun loadUprightPhoto(
         context: Context,
@@ -143,13 +166,19 @@ object SpotyFlowDepthEngine {
     }
 
     /**
-     * Super-Accurate Dual-AI Subject Segmentation (Motorcycles, Cars, People, Pets, Objects).
+     * Super-Accurate Neural Background Removal (Primary: BRIA RMBG-1.4 Native ONNX -> Fallback: ML Kit Subject AI).
      */
     suspend fun segmentSubject(
         context: Context,
         uprightFullPhoto: Bitmap,
         onStatus: (String) -> Unit = {}
     ): DepthCutoutResult = withContext(Dispatchers.Default) {
+        // Tier 1: BRIA RMBG-1.4 Native C++ ONNX (Studio-Grade Full-Scene Background Removal!)
+        val rmbgRes = tryBriaRmbgOnnx(context, uprightFullPhoto, onStatus)
+        if (rmbgRes != null && rmbgRes.hasSubject) {
+            return@withContext rmbgRes
+        }
+
         val maxWorkSide = 1024
         val longest = max(uprightFullPhoto.width, uprightFullPhoto.height)
         val workBmp = if (longest > maxWorkSide) {
@@ -162,17 +191,182 @@ object SpotyFlowDepthEngine {
         }
 
         try {
-            // Tier 1: Google ML Kit Subject Segmentation (All Objects: Motorcycles, Cars, People, Dark Scenes!)
+            // Tier 2: Google ML Kit Subject Segmentation
             val subjectRes = trySubjectSegmentation(context, workBmp, onStatus)
             if (subjectRes != null && subjectRes.hasSubject) {
                 return@withContext subjectRes
             }
 
-            // Tier 2: Offline ML Kit Selfie Segmentation Fallback
+            // Tier 3: Offline ML Kit Selfie Segmentation Fallback
             onStatus("Memproses AI Potong Offline...")
             trySelfieSegmentation(workBmp)
         } finally {
             if (workBmp !== uprightFullPhoto) workBmp.recycle()
+        }
+    }
+
+    private suspend fun ensureRmbgModelFile(
+        context: Context,
+        onStatus: (String) -> Unit
+    ): File? = withContext(Dispatchers.IO) {
+        val target = File(context.filesDir, RMBG_FILE_NAME)
+        if (target.exists() && target.length() > 35_000_000L) {
+            return@withContext target
+        }
+        val tmp = File(context.filesDir, "$RMBG_FILE_NAME.tmp")
+        try {
+            onStatus("Mengunduh AI BRIA RMBG-1.4 (sekali saja)...")
+            val req = Request.Builder().url(RMBG_MODEL_URL).build()
+            downloadClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val body = resp.body ?: return@withContext null
+                val totalBytes = body.contentLength().coerceAtLeast(1L)
+                var downloaded = 0L
+                var lastPct = -1
+                body.byteStream().use { input ->
+                    FileOutputStream(tmp).use { output ->
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val read = input.read(buf)
+                            if (read <= 0) break
+                            output.write(buf, 0, read)
+                            downloaded += read
+                            val pct = ((downloaded * 100L) / totalBytes).toInt().coerceIn(0, 99)
+                            if (pct != lastPct && pct % 4 == 0) {
+                                lastPct = pct
+                                onStatus("Mengunduh AI BRIA RMBG-1.4 ($pct%)...")
+                            }
+                        }
+                        output.flush()
+                    }
+                }
+            }
+            if (tmp.length() > 35_000_000L) {
+                if (target.exists()) target.delete()
+                if (tmp.renameTo(target)) target else null
+            } else {
+                tmp.delete()
+                null
+            }
+        } catch (_: Throwable) {
+            try { tmp.delete() } catch (_: Throwable) {}
+            null
+        }
+    }
+
+    private suspend fun tryBriaRmbgOnnx(
+        context: Context,
+        uprightFullPhoto: Bitmap,
+        onStatus: (String) -> Unit
+    ): DepthCutoutResult? {
+        val modelFile = ensureRmbgModelFile(context, onStatus) ?: return null
+        return try {
+            onStatus("Menghapus latar belakang (BRIA RMBG-1.4 HD)...")
+            val env = OrtEnvironment.getEnvironment()
+            val session = cachedOrtSession ?: synchronized(this) {
+                cachedOrtSession ?: run {
+                    val opts = OrtSession.SessionOptions().apply {
+                        setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(2, 4))
+                        setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                    }
+                    env.createSession(modelFile.absolutePath, opts).also { cachedOrtSession = it }
+                }
+            }
+
+            // Official BRIA RMBG-1.4 preprocessing: 1024x1024, RGB/255 - 0.5 (mean=0.5, std=1.0), NCHW
+            val size = RMBG_INPUT_SIZE
+            val resized = Bitmap.createScaledBitmap(uprightFullPhoto, size, size, true)
+            val totalSq = size * size
+            val pixels = IntArray(totalSq)
+            resized.getPixels(pixels, 0, size, 0, 0, size, size)
+            if (resized !== uprightFullPhoto) resized.recycle()
+
+            val nchw = FloatArray(3 * totalSq)
+            val inv255 = 1f / 255f
+            for (i in 0 until totalSq) {
+                val c = pixels[i]
+                nchw[i] = ((c ushr 16) and 0xFF) * inv255 - 0.5f
+                nchw[totalSq + i] = ((c ushr 8) and 0xFF) * inv255 - 0.5f
+                nchw[2 * totalSq + i] = (c and 0xFF) * inv255 - 0.5f
+            }
+
+            val inputName = session.inputNames.iterator().next()
+            val rawOut = FloatArray(totalSq)
+            OnnxTensor.createTensor(
+                env,
+                FloatBuffer.wrap(nchw),
+                longArrayOf(1L, 3L, size.toLong(), size.toLong())
+            ).use { inputTensor ->
+                session.run(mapOf(inputName to inputTensor)).use { result ->
+                    val outTensor = result[0] as OnnxTensor
+                    val fb = outTensor.floatBuffer
+                    fb.rewind()
+                    if (fb.remaining() < totalSq) return null
+                    fb.get(rawOut)
+                }
+            }
+
+            // Official BRIA min-max normalization
+            var mn = Float.POSITIVE_INFINITY
+            var mx = Float.NEGATIVE_INFINITY
+            for (i in 0 until totalSq) {
+                val v = rawOut[i]
+                if (v < mn) mn = v
+                if (v > mx) mx = v
+            }
+            val invRange = 1f / (mx - mn).coerceAtLeast(1e-5f)
+
+            // Resample 1024x1024 square probability map back to photo's exact aspect ratio (max side 1024)
+            val longest = max(uprightFullPhoto.width, uprightFullPhoto.height)
+            val sc = min(1f, 1024f / longest.toFloat())
+            val outW = (uprightFullPhoto.width * sc).roundToInt().coerceAtLeast(64)
+            val outH = (uprightFullPhoto.height * sc).roundToInt().coerceAtLeast(64)
+            val outTotal = outW * outH
+            val conf = FloatArray(outTotal)
+            var fgCount = 0
+
+            val scaleX = (size - 1).toFloat() / (outW - 1).coerceAtLeast(1).toFloat()
+            val scaleY = (size - 1).toFloat() / (outH - 1).coerceAtLeast(1).toFloat()
+            for (y in 0 until outH) {
+                val sy = y * scaleY
+                val y0 = sy.toInt().coerceIn(0, size - 1)
+                val y1 = (y0 + 1).coerceAtMost(size - 1)
+                val fy = sy - y0
+                val row0 = y0 * size
+                val row1 = y1 * size
+                val dstRow = y * outW
+                for (x in 0 until outW) {
+                    val sx = x * scaleX
+                    val x0 = sx.toInt().coerceIn(0, size - 1)
+                    val x1 = (x0 + 1).coerceAtMost(size - 1)
+                    val fx = sx - x0
+                    val v00 = rawOut[row0 + x0]
+                    val v10 = rawOut[row0 + x1]
+                    val v01 = rawOut[row1 + x0]
+                    val v11 = rawOut[row1 + x1]
+                    val top = v00 + (v10 - v00) * fx
+                    val bot = v01 + (v11 - v01) * fx
+                    val v = (((top + (bot - top) * fy) - mn) * invRange).coerceIn(0f, 1f)
+                    conf[dstRow + x] = v
+                    if (v > 0.5f) fgCount++
+                }
+            }
+
+            val cov = fgCount.toFloat() / outTotal.coerceAtLeast(1).toFloat()
+            if (cov in 0.005f..0.99f) {
+                DepthCutoutResult(
+                    rawConfidence = conf,
+                    maskWidth = outW,
+                    maskHeight = outH,
+                    coverage = cov,
+                    hasSubject = true,
+                    engineLabel = "BRIA RMBG-1.4 HD"
+                )
+            } else {
+                null
+            }
+        } catch (_: Throwable) {
+            null
         }
     }
 
@@ -221,7 +415,7 @@ object SpotyFlowDepthEngine {
                     var fgCount = 0
                     for (i in 0 until total) if (conf[i] > 0.5f) fgCount++
                     val cov = fgCount.toFloat() / total.coerceAtLeast(1).toFloat()
-                    if (cov in 0.018f..0.965f) {
+                    if (cov in 0.015f..0.97f) {
                         return DepthCutoutResult(
                             rawConfidence = conf,
                             maskWidth = w,
@@ -252,7 +446,7 @@ object SpotyFlowDepthEngine {
                 if (a > 0.5f) fgCount++
             }
             val cov = fgCount.toFloat() / total.coerceAtLeast(1).toFloat()
-            if (cov in 0.018f..0.965f) {
+            if (cov in 0.015f..0.97f) {
                 DepthCutoutResult(
                     rawConfidence = conf,
                     maskWidth = w,
@@ -365,12 +559,11 @@ object SpotyFlowDepthEngine {
     }
 
     /**
-     * Builds Full-HD 1:1 transparent subject cutout + alphaMaskBitmap (v2.8.0-native Studio Matte):
-     * - Layer 3 = Exact Layer 1 photo with ONLY the background removed (pure 0x00000000)!
-     * - Uses Fast O(N) Edge-Aware Guided Filter guided by the actual Layer 1 RGB luminance so boundaries
-     *   snap pixel-accurately onto motorcycles, mirrors, handlebars, hair, and dark objects WITHOUT
-     *   destructive morphological erosion!
-     * - Respects Sensitivity slider, Edge Feather slider, and manual Rapikan Kuas brush strokes.
+     * Builds Full-HD 1:1 transparent subject cutout + alphaMaskBitmap directly from pure neural alpha:
+     * - ZERO destructive border flood-purge and ZERO blurring guided filter!
+     * - At neutral sensitivity (0.48..0.52): exact BRIA RMBG-1.4 alpha with crisp background floor (<8% -> 0)
+     *   and solid interior (>94% -> 1).
+     * - Manual Rapikan Kuas brush always overrides cleanly on top.
      */
     fun buildTransparentObjectCutoutWithMask(
         uprightFullPhoto: Bitmap,
@@ -401,114 +594,30 @@ object SpotyFlowDepthEngine {
             null
         }
 
-        // Stage 1: Border-Connected Low-Confidence Background Purge (erases glowing floors & wall haze!)
-        val bgPurgeThresh = (sens + 0.14f).coerceIn(0.28f, 0.76f)
-        val bgVisited = BooleanArray(total)
-        val bfsQueue = IntArray(total)
-        var qHead = 0
-        var qTail = 0
-        fun seedBg(idx: Int) {
-            if (!bgVisited[idx] && rawConfidence[idx] < bgPurgeThresh) {
-                bgVisited[idx] = true
-                bfsQueue[qTail++] = idx
-            }
-        }
-        for (x in 0 until maskW) {
-            seedBg(x)
-            seedBg((maskH - 1) * maskW + x)
-        }
-        for (y in 1 until maskH - 1) {
-            seedBg(y * maskW)
-            seedBg(y * maskW + (maskW - 1))
-        }
-        while (qHead < qTail) {
-            val cur = bfsQueue[qHead++]
-            val cx = cur % maskW
-            val cy = cur / maskW
-            if (cx > 0) seedBg(cur - 1)
-            if (cx < maskW - 1) seedBg(cur + 1)
-            if (cy > 0) seedBg(cur - maskW)
-            if (cy < maskH - 1) seedBg(cur + maskW)
-        }
-
-        // Stage 2: Strict Background Cutoff Smoothstep + Fringe Tightening (kills 5%-35% floor/wall smudge!)
-        val halfSpan = 0.08f + feather * 0.16f
-        val low = (sens - halfSpan).coerceIn(0.14f, 0.75f)
-        val high = (sens + halfSpan + 0.08f).coerceIn(low + 0.06f, 0.95f)
+        val isNeutral = abs(sens - 0.50f) < 0.035f
+        val span = 0.04f + feather * 0.18f
+        val low = (sens - span).coerceIn(0.03f, 0.82f)
+        val high = (sens + span).coerceIn(low + 0.05f, 0.97f)
         val invRange = 1f / (high - low).coerceAtLeast(0.01f)
 
-        val work = FloatArray(total)
-        for (i in 0 until total) {
-            if (bgVisited[i]) {
-                work[i] = 0f
-                continue
-            }
-            val c = rawConfidence[i]
-            var a = when {
-                c <= low -> 0f
-                c >= high -> 1f
-                else -> {
-                    val t = ((c - low) * invRange).coerceIn(0f, 1f)
-                    val s = t * t * (3f - 2f * t)
-                    Math.pow(s.toDouble(), 1.18).toFloat()
-                }
-            }
-            work[i] = a
-        }
-
-        // Stage 3: Main-Subject Connected-Component Filter (kills disconnected floor debris/bags/lamps; keeps connected handlebars/mirrors!)
-        val labels = IntArray(total)
-        val compSizes = ArrayList<Int>(64).apply { add(0) }
-        var nextLabel = 1
-        var maxComp = 0
-        for (i in 0 until total) {
-            if (work[i] < 0.35f || labels[i] != 0) continue
-            val lbl = nextLabel++
-            var hd = 0
-            var tl = 0
-            labels[i] = lbl
-            bfsQueue[tl++] = i
-            while (hd < tl) {
-                val cur = bfsQueue[hd++]
-                val cx = cur % maskW
-                val cy = cur / maskW
-                if (cx > 0 && work[cur - 1] >= 0.35f && labels[cur - 1] == 0) { labels[cur - 1] = lbl; bfsQueue[tl++] = cur - 1 }
-                if (cx < maskW - 1 && work[cur + 1] >= 0.35f && labels[cur + 1] == 0) { labels[cur + 1] = lbl; bfsQueue[tl++] = cur + 1 }
-                if (cy > 0 && work[cur - maskW] >= 0.35f && labels[cur - maskW] == 0) { labels[cur - maskW] = lbl; bfsQueue[tl++] = cur - maskW }
-                if (cy < maskH - 1 && work[cur + maskW] >= 0.35f && labels[cur + maskW] == 0) { labels[cur + maskW] = lbl; bfsQueue[tl++] = cur + maskW }
-            }
-            compSizes.add(tl)
-            if (tl > maxComp) maxComp = tl
-        }
-        val minKeep = max(48, (maxComp * 0.05f).toInt())
-        for (i in 0 until total) {
-            val lbl = labels[i]
-            if (lbl == 0 || compSizes[lbl] < minKeep) {
-                if (work[i] < 0.90f || (lbl > 0 && compSizes[lbl] < minKeep)) {
-                    work[i] = 0f
-                }
-            }
-        }
-
-        // Stage 4: Fast O(N) Guided Edge-Aware Alpha Matting guided by Layer 1 RGB luminance
-        val guideLum = extractLuminance(uprightFullPhoto, maskW, maskH)
-        val guided = guidedFilterAlpha(
-            guide = guideLum,
-            srcAlpha = work,
-            w = maskW,
-            h = maskH,
-            radius = if (max(maskW, maskH) >= 720) 4 else 3,
-            eps = 0.002f
-        )
-
-        // Stage 5: Final Clean Alpha + Manual Rapikan Kuas Override (ALWAYS wins!)
         val maskPixels = IntArray(total)
         for (i in 0 until total) {
-            var a = guided[i].coerceIn(0f, 1f)
-            a = when {
-                a < 0.06f -> 0f
-                a > 0.95f -> 1f
-                else -> a
+            var a = rawConfidence[i].coerceIn(0f, 1f)
+            if (isNeutral) {
+                a = when {
+                    a <= 0.08f -> 0f
+                    a >= 0.94f -> 1f
+                    else -> (a - 0.08f) / 0.86f
+                }
+            } else {
+                a = when {
+                    a <= low -> 0f
+                    a >= high -> 1f
+                    else -> {
+                        val t = ((a - low) * invRange).coerceIn(0f, 1f)
+                        t * t * (3f - 2f * t)
+                    }
+                }
             }
             if (brushPixels != null) {
                 val bp = brushPixels[i]
@@ -546,107 +655,6 @@ object SpotyFlowDepthEngine {
         canvas.drawBitmap(alphaMaskBmp, null, dstRect, maskPaint)
 
         return CutoutBundle(cutoutBitmap = cutoutBmp, alphaMaskBitmap = alphaMaskBmp)
-    }
-
-    private fun extractLuminance(photo: Bitmap, w: Int, h: Int): FloatArray {
-        val scaled = if (photo.width != w || photo.height != h) {
-            Bitmap.createScaledBitmap(photo, w, h, true)
-        } else {
-            photo
-        }
-        val total = w * h
-        val px = IntArray(total)
-        scaled.getPixels(px, 0, w, 0, 0, w, h)
-        if (scaled !== photo) scaled.recycle()
-        val lum = FloatArray(total)
-        for (i in 0 until total) {
-            val c = px[i]
-            val r = ((c ushr 16) and 0xFF) / 255f
-            val g = ((c ushr 8) and 0xFF) / 255f
-            val b = (c and 0xFF) / 255f
-            lum[i] = 0.299f * r + 0.587f * g + 0.114f * b
-        }
-        return lum
-    }
-
-    private fun boxMean(src: FloatArray, w: Int, h: Int, r: Int): FloatArray {
-        val tmp = FloatArray(w * h)
-        val out = FloatArray(w * h)
-        // Horizontal pass
-        for (y in 0 until h) {
-            val row = y * w
-            var sum = 0f
-            var cnt = 0
-            for (x in 0..min(r, w - 1)) {
-                sum += src[row + x]
-                cnt++
-            }
-            for (x in 0 until w) {
-                tmp[row + x] = sum / cnt
-                val addX = x + r + 1
-                if (addX < w) { sum += src[row + addX]; cnt++ }
-                val remX = x - r
-                if (remX >= 0) { sum -= src[row + remX]; cnt-- }
-            }
-        }
-        // Vertical pass
-        for (x in 0 until w) {
-            var sum = 0f
-            var cnt = 0
-            for (y in 0..min(r, h - 1)) {
-                sum += tmp[y * w + x]
-                cnt++
-            }
-            for (y in 0 until h) {
-                out[y * w + x] = sum / cnt
-                val addY = y + r + 1
-                if (addY < h) { sum += tmp[addY * w + x]; cnt++ }
-                val remY = y - r
-                if (remY >= 0) { sum -= tmp[remY * w + x]; cnt-- }
-            }
-        }
-        return out
-    }
-
-    private fun guidedFilterAlpha(
-        guide: FloatArray,
-        srcAlpha: FloatArray,
-        w: Int,
-        h: Int,
-        radius: Int,
-        eps: Float
-    ): FloatArray {
-        val total = w * h
-        val meanI = boxMean(guide, w, h, radius)
-        val meanP = boxMean(srcAlpha, w, h, radius)
-        val ii = FloatArray(total) { guide[it] * guide[it] }
-        val ip = FloatArray(total) { guide[it] * srcAlpha[it] }
-        val corrI = boxMean(ii, w, h, radius)
-        val corrIP = boxMean(ip, w, h, radius)
-
-        val a = FloatArray(total)
-        val b = FloatArray(total)
-        for (i in 0 until total) {
-            val varI = (corrI[i] - meanI[i] * meanI[i]).coerceAtLeast(0f)
-            val covIP = corrIP[i] - meanI[i] * meanP[i]
-            val ai = covIP / (varI + eps)
-            a[i] = ai
-            b[i] = meanP[i] - ai * meanI[i]
-        }
-        val meanA = boxMean(a, w, h, radius)
-        val meanB = boxMean(b, w, h, radius)
-
-        val result = FloatArray(total)
-        for (i in 0 until total) {
-            val orig = srcAlpha[i]
-            // Only apply edge-snapping in boundary transition band; preserve solid interior & pure bg 100%!
-            result[i] = when {
-                orig >= 0.985f -> 1f
-                orig <= 0.015f -> 0f
-                else -> (meanA[i] * guide[i] + meanB[i]).coerceIn(0f, 1f)
-            }
-        }
-        return result
     }
 
     /**
