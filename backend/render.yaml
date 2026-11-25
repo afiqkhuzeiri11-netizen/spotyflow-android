@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: veloxtube-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: CORS_ORIGINS
+        value: https://spotyflow.vercel.app,http://localhost:5173,https://localhost,capacitor://localhost,http://tauri.localhost
+      - key: GOOGLE_CLIENT_ID
+        value: 602927550377-v1dicdufnh5t2l3baq74jlbtg4gold37.apps.googleusercontent.com
