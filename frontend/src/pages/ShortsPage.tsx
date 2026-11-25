@@ -192,7 +192,7 @@ export const ShortsPage: React.FC<ShortsPageProps> = ({ onShareVideo, onNotify }
             <ShortVideoItem
               video={shortVideo}
               isActive={idx === activeIndex}
-              shouldLoad={Math.abs(idx - activeIndex) <= 1}
+              shouldLoad={idx >= activeIndex - 1 && idx <= activeIndex + 2}
               isMuted={isMuted}
               commentCountOverride={commentCounts[shortVideo.id]}
               onToggleMute={handleToggleMute}

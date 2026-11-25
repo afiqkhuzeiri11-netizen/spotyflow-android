@@ -10,7 +10,6 @@ import { WATCH_LATER_KEY } from './config/api';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { PlayerProvider, usePlayer } from './context/PlayerContext';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
-import { useDebounce } from './hooks/useDebounce';
 import { useNativeBridge } from './hooks/useNativeBridge';
 import { HomePage } from './pages/HomePage';
 import { ShortsPage } from './pages/ShortsPage';
@@ -53,7 +52,7 @@ const AppShell: React.FC = () => {
   const [activeSection, setActiveSection] = useState<SidebarKey>('home');
   const [activeCategory, setActiveCategory] = useState<CategoryId>('all');
   const [searchInput, setSearchInput] = useState('');
-  const debouncedSearch = useDebounce(searchInput, 300);
+  const [submittedSearch, setSubmittedSearch] = useState('');
 
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
@@ -65,7 +64,6 @@ const AppShell: React.FC = () => {
   const isOnWatchRoute = location.pathname.startsWith('/watch/');
   const isOnShortsRoute = location.pathname.startsWith('/shorts');
 
-  // Automatic Miniplayer Mode whenever user leaves /watch/:id while a video is active
   useEffect(() => {
     if (!activeVideo) return;
     if (!isOnWatchRoute && !isOnShortsRoute && !isMiniplayer) {
@@ -102,6 +100,7 @@ const AppShell: React.FC = () => {
     setActiveSection('home');
     setActiveCategory('all');
     setSearchInput('');
+    setSubmittedSearch('');
     if (activeVideo && isOnWatchRoute) {
       setMiniplayer(true);
     }
@@ -116,6 +115,8 @@ const AppShell: React.FC = () => {
         return;
       }
       setActiveSection(key);
+      setSubmittedSearch('');
+      setSearchInput('');
       if (key === 'home') setActiveCategory('all');
       if (activeVideo && isOnWatchRoute) {
         setMiniplayer(true);
@@ -126,15 +127,26 @@ const AppShell: React.FC = () => {
     [activeVideo, isOnWatchRoute, setMiniplayer, location.pathname, navigate]
   );
 
-  const handleSearchChange = useCallback(
+  const handleSearchInputChange = useCallback((val: string) => {
+    setSearchInput(val);
+    if (!val.trim()) {
+      setSubmittedSearch('');
+    }
+  }, []);
+
+  const handleSearchSubmit = useCallback(
     (val: string) => {
-      setSearchInput(val);
+      const clean = val.trim();
+      setSearchInput(clean);
+      setSubmittedSearch(clean);
+      setActiveSection('home');
       if (activeVideo && isOnWatchRoute) {
         setMiniplayer(true);
       }
       if (location.pathname !== '/') {
         navigate('/');
       }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     },
     [activeVideo, isOnWatchRoute, setMiniplayer, location.pathname, navigate]
   );
@@ -142,6 +154,8 @@ const AppShell: React.FC = () => {
   const handleSelectTag = useCallback(
     (tag: string) => {
       setSearchInput(tag);
+      setSubmittedSearch(tag);
+      setActiveSection('home');
       if (activeVideo) {
         setMiniplayer(true);
       }
@@ -165,7 +179,8 @@ const AppShell: React.FC = () => {
       openAuthModal('login');
       return;
     }
-    setActiveSection('watch_later');
+    setActiveSection('history');
+    setSubmittedSearch('');
     if (activeVideo && isOnWatchRoute) {
       setMiniplayer(true);
     }
@@ -173,18 +188,22 @@ const AppShell: React.FC = () => {
   }, [user, openAuthModal, activeVideo, isOnWatchRoute, setMiniplayer, location.pathname, navigate]);
 
   const handleOpenWatch = useCallback(
-    (videoId: number) => {
+    (video: VideoCardItem) => {
       setMiniplayer(false);
-      navigate(`/watch/${videoId}`);
+      // Pre-load metadata immediately for zero perceived delay
+      loadVideoIntoPlayer(video, false);
+      const target = video.yt_id ? `/watch/yt_${video.yt_id}` : `/watch/${video.id}`;
+      navigate(target);
       window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
     },
-    [setMiniplayer, navigate]
+    [setMiniplayer, loadVideoIntoPlayer, navigate]
   );
 
   const handleExpandMiniplayer = useCallback(() => {
     if (!activeVideo) return;
     setMiniplayer(false);
-    navigate(`/watch/${activeVideo.id}`);
+    const target = activeVideo.yt_id ? `/watch/yt_${activeVideo.yt_id}` : `/watch/${activeVideo.id}`;
+    navigate(target);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, [activeVideo, setMiniplayer, navigate]);
 
@@ -214,7 +233,8 @@ const AppShell: React.FC = () => {
     if (!nextVideo) return;
     loadVideoIntoPlayer(nextVideo, isMiniplayer && !isOnWatchRoute);
     if (isOnWatchRoute) {
-      navigate(`/watch/${nextVideo.id}`);
+      const target = nextVideo.yt_id ? `/watch/yt_${nextVideo.yt_id}` : `/watch/${nextVideo.id}`;
+      navigate(target);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   }, [nextVideo, loadVideoIntoPlayer, isMiniplayer, isOnWatchRoute, navigate]);
@@ -240,6 +260,8 @@ const AppShell: React.FC = () => {
     (video: VideoCardItem) => {
       const link = video.is_short
         ? `${window.location.origin}/shorts`
+        : video.yt_id
+        ? `${window.location.origin}/watch/yt_${video.yt_id}`
         : `${window.location.origin}/watch/${video.id}`;
       navigator.clipboard?.writeText(link).catch(() => {});
       showToast(`Tautan "${video.title}" disalin`);
@@ -251,6 +273,7 @@ const AppShell: React.FC = () => {
     setActiveSection('home');
     setActiveCategory('all');
     setSearchInput('');
+    setSubmittedSearch('');
     if (location.pathname !== '/') navigate('/');
   }, [location.pathname, navigate]);
 
@@ -260,6 +283,7 @@ const AppShell: React.FC = () => {
       setActiveSection('home');
       setActiveCategory('all');
       setSearchInput('');
+      setSubmittedSearch('');
       if (location.pathname !== '/') navigate('/');
       setRefreshTick((t) => t + 1);
     },
@@ -274,12 +298,13 @@ const AppShell: React.FC = () => {
     <div className="min-h-screen w-full" style={{ backgroundColor: 'var(--vt-bg)' }}>
       <Header
         searchInput={searchInput}
-        onSearchInputChange={handleSearchChange}
+        onSearchInputChange={handleSearchInputChange}
+        onSearchSubmit={handleSearchSubmit}
         onToggleSidebar={handleToggleSidebar}
         onLogoClick={handleLogoClick}
         onOpenUpload={handleOpenUpload}
         onNavigateProfile={handleProfileClick}
-        onLogoutToast={() => showToast('Berhasil keluar dari akun.')}
+        onNotify={showToast}
       />
 
       <div className="flex w-full items-start">
@@ -292,11 +317,6 @@ const AppShell: React.FC = () => {
         />
 
         <main className="min-w-0 flex-1">
-          {/*
-            Single Stable Wrapper:
-            Keeping <GlobalVideoPlayer> as child #0 inside this div ensures React NEVER unmounts
-            the <video> element across /watch/:id <-> Theater <-> Floating Miniplayer <-> Home!
-          */}
           <div
             className={
               watchGridActive
@@ -329,7 +349,7 @@ const AppShell: React.FC = () => {
                     sidebarExpanded={sidebarExpanded}
                     activeSection={activeSection}
                     activeCategory={activeCategory}
-                    searchQuery={debouncedSearch}
+                    searchQuery={submittedSearch}
                     refreshTick={refreshTick}
                     watchLaterIds={watchLaterIds}
                     onSelectCategory={setActiveCategory}
@@ -337,6 +357,7 @@ const AppShell: React.FC = () => {
                     onToggleWatchLater={handleToggleWatchLater}
                     onShareVideo={handleShareVideo}
                     onResetFilters={handleResetFilters}
+                    onNotify={showToast}
                   />
                 }
               />
@@ -363,7 +384,7 @@ const AppShell: React.FC = () => {
                     sidebarExpanded={sidebarExpanded}
                     activeSection={activeSection}
                     activeCategory={activeCategory}
-                    searchQuery={debouncedSearch}
+                    searchQuery={submittedSearch}
                     refreshTick={refreshTick}
                     watchLaterIds={watchLaterIds}
                     onSelectCategory={setActiveCategory}
@@ -371,6 +392,7 @@ const AppShell: React.FC = () => {
                     onToggleWatchLater={handleToggleWatchLater}
                     onShareVideo={handleShareVideo}
                     onResetFilters={handleResetFilters}
+                    onNotify={showToast}
                   />
                 }
               />

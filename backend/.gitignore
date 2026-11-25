@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.db-shm
+*.db-wal
+media/uploads/
+media/hls/
+media/thumbnails/

@@ -1,7 +1,19 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { AUTH_TOKEN_KEY } from '../config/api';
+import { AUTH_TOKEN_KEY, GOOGLE_CLIENT_ID } from '../config/api';
 import { authApi, extractApiError } from '../services/api';
 import type { UserPublic } from '../types/api';
+
+const GOOGLE_YOUTUBE_SCOPES = [
+  'openid',
+  'email',
+  'profile',
+  'https://www.googleapis.com/auth/youtube.readonly',
+  'https://www.googleapis.com/auth/youtube.force-ssl',
+].join(' ');
+
+interface GoogleOAuthTokenClient {
+  requestAccessToken: (overrideConfig?: { prompt?: string }) => void;
+}
 
 interface AuthContextValue {
   user: UserPublic | null;
@@ -18,6 +30,7 @@ interface AuthContextValue {
     display_name?: string;
   }) => Promise<UserPublic>;
   loginWithGoogle: (credential: string) => Promise<UserPublic>;
+  connectGoogleYouTube: () => Promise<UserPublic>;
   logout: () => void;
 }
 
@@ -29,7 +42,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<'login' | 'register'>('login');
 
-  // Restore active JWT session from FastAPI GET /api/auth/me on startup
   useEffect(() => {
     let active = true;
     const token = localStorage.getItem(AUTH_TOKEN_KEY);
@@ -113,6 +125,60 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
+  const connectGoogleYouTube = useCallback(async (): Promise<UserPublic> => {
+    const g = (
+      window as unknown as {
+        google?: {
+          accounts?: {
+            oauth2?: {
+              initTokenClient: (cfg: {
+                client_id: string;
+                scope: string;
+                callback: (resp: { access_token?: string; error?: string }) => void;
+              }) => GoogleOAuthTokenClient;
+            };
+          };
+        };
+      }
+    ).google;
+
+    const oauth2 = g?.accounts?.oauth2;
+    if (!oauth2) {
+      throw new Error(
+        'Google Identity Services belum selesai dimuat. Pastikan koneksi internet aktif lalu coba lagi.'
+      );
+    }
+
+    return new Promise<UserPublic>((resolve, reject) => {
+      try {
+        const client = oauth2.initTokenClient({
+          client_id: GOOGLE_CLIENT_ID,
+          scope: GOOGLE_YOUTUBE_SCOPES,
+          callback: async (resp) => {
+            if (resp.error || !resp.access_token) {
+              reject(new Error('Otorisasi akun Google & YouTube dibatalkan.'));
+              return;
+            }
+            try {
+              const authRes = await authApi.loginWithGoogleOAuth(resp.access_token);
+              localStorage.setItem(AUTH_TOKEN_KEY, authRes.access_token);
+              setUser(authRes.user);
+              setAuthModalOpen(false);
+              resolve(authRes.user);
+            } catch (err) {
+              reject(
+                new Error(extractApiError(err, 'Gagal menyinkronkan akun YouTube Anda.'))
+              );
+            }
+          },
+        });
+        client.requestAccessToken({ prompt: 'consent' });
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error('Gagal membuka OAuth Google YouTube.'));
+      }
+    });
+  }, []);
+
   const logout = useCallback(() => {
     try {
       localStorage.removeItem(AUTH_TOKEN_KEY);
@@ -139,6 +205,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       login,
       register,
       loginWithGoogle,
+      connectGoogleYouTube,
       logout,
     }),
     [
@@ -151,6 +218,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       login,
       register,
       loginWithGoogle,
+      connectGoogleYouTube,
       logout,
     ]
   );

@@ -6,7 +6,12 @@ import { UpNextList } from '../components/watch/UpNextList';
 import { VideoInfoPanel } from '../components/watch/VideoInfoPanel';
 import { useAuth } from '../context/AuthContext';
 import { usePlayer } from '../context/PlayerContext';
-import { extractApiError, videosApi } from '../services/api';
+import {
+  extractApiError,
+  historyApi,
+  videosApi,
+  youtubeApi,
+} from '../services/api';
 import type { VideoCardItem, VideoDetailItem } from '../types/api';
 
 interface WatchPageProps {
@@ -29,7 +34,11 @@ export const WatchPage: React.FC<WatchPageProps> = ({
   const { user, openAuthModal } = useAuth();
   const { activeVideo, isMiniplayer, isTheater, loadVideoIntoPlayer } = usePlayer();
 
-  const videoId = Number(id);
+  const rawParam = (id || '').trim();
+  const isYoutubeRoute = rawParam.startsWith('yt_');
+  const ytId = isYoutubeRoute ? rawParam.slice(3) : null;
+  const numericVideoId = !isYoutubeRoute ? Number(rawParam) : 0;
+
   const [detail, setDetail] = useState<VideoDetailItem | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -37,7 +46,7 @@ export const WatchPage: React.FC<WatchPageProps> = ({
   const [isSubscribing, setIsSubscribing] = useState(false);
 
   const fetchDetail = useCallback(async () => {
-    if (!Number.isFinite(videoId) || videoId <= 0) {
+    if (!rawParam) {
       setErrorMsg('ID video tidak valid.');
       setLoading(false);
       return;
@@ -45,17 +54,78 @@ export const WatchPage: React.FC<WatchPageProps> = ({
 
     setLoading(true);
     setErrorMsg(null);
+
     try {
-      const data = await videosApi.detail(videoId);
-      setDetail(data);
-      // Sync into persistent GlobalVideoPlayer (same id never reloads stream)
-      loadVideoIntoPlayer(data, false);
+      // Check saved Resume Playback position across devices
+      const historyList = await historyApi.list().catch(() => []);
+      const savedEntry = historyList.find((h) => h.video_key === rawParam);
+      const resumeSec = savedEntry?.position_sec || 0;
+
+      if (isYoutubeRoute && ytId) {
+        const [streamInfo, feedRecs] = await Promise.all([
+          videosApi.youtubeStream(ytId),
+          videosApi.list({ page: 1, limit: 12 }),
+        ]);
+
+        const ytDetail: VideoDetailItem = {
+          id: activeVideo?.yt_id === ytId ? activeVideo.id : Math.abs(ytId.split('').reduce((a, c) => (a * 31 + c.charCodeAt(0)) | 0, 7)),
+          yt_id: ytId,
+          yt_channel_id: streamInfo.channel_id,
+          embed_url: streamInfo.embed_url,
+          resume_position_sec: resumeSec,
+          title: streamInfo.title,
+          description: streamInfo.description,
+          category: 'youtube',
+          tags: streamInfo.tags || ['youtube'],
+          thumbnail_url: streamInfo.thumbnail_url,
+          hls_url: streamInfo.hls_url,
+          mp4_url: streamInfo.mp4_url,
+          duration_sec: streamInfo.duration_sec,
+          views: streamInfo.views,
+          likes_count: streamInfo.likes_count,
+          dislikes_count: 0,
+          liked_by_me: false,
+          disliked_by_me: false,
+          comments_count: 0,
+          is_short: streamInfo.is_short,
+          is_live: streamInfo.is_live,
+          processing_status: 'ready',
+          created_at: new Date().toISOString(),
+          channel: {
+            id: 90001,
+            username: streamInfo.channel_id,
+            display_name: streamInfo.channel_name,
+            handle: `@${streamInfo.channel_name.toLowerCase().replace(/[^a-z0-9_]/g, '') || 'youtube'}`,
+            avatar_url: null,
+            verified: true,
+            subscribers_count: streamInfo.subscribers_count,
+            subscribed_by_me: false,
+            yt_channel_id: streamInfo.channel_id,
+          },
+          recommendations: feedRecs.items,
+        };
+
+        setDetail(ytDetail);
+        loadVideoIntoPlayer(ytDetail, false);
+        return;
+      }
+
+      if (!Number.isFinite(numericVideoId) || numericVideoId <= 0) {
+        setErrorMsg('ID video tidak valid.');
+        return;
+      }
+
+      const data = await videosApi.detail(numericVideoId);
+      const withResume: VideoDetailItem =
+        resumeSec > 5 ? { ...data, resume_position_sec: resumeSec } : data;
+      setDetail(withResume);
+      loadVideoIntoPlayer(withResume, false);
     } catch (err) {
       setErrorMsg(extractApiError(err, 'Gagal memuat detail video.'));
     } finally {
       setLoading(false);
     }
-  }, [videoId, loadVideoIntoPlayer]);
+  }, [rawParam, isYoutubeRoute, ytId, numericVideoId, loadVideoIntoPlayer, activeVideo?.yt_id, activeVideo?.id]);
 
   useEffect(() => {
     fetchDetail();
@@ -99,18 +169,26 @@ export const WatchPage: React.FC<WatchPageProps> = ({
 
       setIsReacting(true);
       try {
-        const res = await videosApi.react(detail.id, action);
-        setDetail((curr) =>
-          curr && curr.id === res.video_id
-            ? {
-                ...curr,
-                likes_count: res.likes_count,
-                dislikes_count: res.dislikes_count,
-                liked_by_me: res.liked_by_me,
-                disliked_by_me: res.disliked_by_me,
-              }
-            : curr
-        );
+        if (detail.yt_id) {
+          const rating = nextLiked ? 'like' : nextDisliked ? 'dislike' : 'none';
+          const res = await youtubeApi.rate(detail.yt_id, rating);
+          if (res.synced) {
+            onNotify('Reaksi disinkronkan langsung ke akun YouTube Anda!');
+          }
+        } else {
+          const res = await videosApi.react(detail.id, action);
+          setDetail((curr) =>
+            curr && curr.id === res.video_id
+              ? {
+                  ...curr,
+                  likes_count: res.likes_count,
+                  dislikes_count: res.dislikes_count,
+                  liked_by_me: res.liked_by_me,
+                  disliked_by_me: res.disliked_by_me,
+                }
+              : curr
+          );
+        }
       } catch (err) {
         setDetail(snapshot);
         onNotify(extractApiError(err, 'Gagal menyimpan reaksi video.'));
@@ -143,24 +221,35 @@ export const WatchPage: React.FC<WatchPageProps> = ({
 
     setIsSubscribing(true);
     try {
-      const res = await videosApi.subscribe(detail.channel.id);
-      setDetail((curr) =>
-        curr && curr.channel.id === res.channel_id
-          ? {
-              ...curr,
-              channel: {
-                ...curr.channel,
-                subscribed_by_me: res.subscribed,
-                subscribers_count: res.subscribers_count,
-              },
-            }
-          : curr
-      );
-      onNotify(
-        res.subscribed
-          ? `Berhasil subscribe ${detail.channel.display_name}`
-          : `Berhenti subscribe ${detail.channel.display_name}`
-      );
+      if (detail.channel.yt_channel_id) {
+        const res = await youtubeApi.subscribe(detail.channel.yt_channel_id);
+        onNotify(
+          res.synced
+            ? `Berhasil subscribe ${detail.channel.display_name} (tersinkron ke YouTube!)`
+            : nextSub
+            ? `Subscribe ke ${detail.channel.display_name}`
+            : `Berhenti subscribe ${detail.channel.display_name}`
+        );
+      } else {
+        const res = await videosApi.subscribe(detail.channel.id);
+        setDetail((curr) =>
+          curr && curr.channel.id === res.channel_id
+            ? {
+                ...curr,
+                channel: {
+                  ...curr.channel,
+                  subscribed_by_me: res.subscribed,
+                  subscribers_count: res.subscribers_count,
+                },
+              }
+            : curr
+        );
+        onNotify(
+          res.subscribed
+            ? `Berhasil subscribe ${detail.channel.display_name}`
+            : `Berhenti subscribe ${detail.channel.display_name}`
+        );
+      }
     } catch (err) {
       setDetail(snapshot);
       onNotify(extractApiError(err, 'Gagal mengubah status subscribe.'));
@@ -172,7 +261,8 @@ export const WatchPage: React.FC<WatchPageProps> = ({
   const handleSelectRecommended = useCallback(
     (vid: VideoCardItem) => {
       loadVideoIntoPlayer(vid, false);
-      navigate(`/watch/${vid.id}`);
+      const target = vid.yt_id ? `/watch/yt_${vid.yt_id}` : `/watch/${vid.id}`;
+      navigate(target);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     },
     [loadVideoIntoPlayer, navigate]
@@ -186,7 +276,6 @@ export const WatchPage: React.FC<WatchPageProps> = ({
     if (detail) onToggleWatchLater(detail.id);
   }, [detail, onToggleWatchLater]);
 
-  // Error State
   if (!loading && errorMsg) {
     return (
       <div className="col-span-full mx-auto my-12 flex max-w-md flex-col items-center rounded-2xl p-8 text-center">
@@ -219,7 +308,6 @@ export const WatchPage: React.FC<WatchPageProps> = ({
     );
   }
 
-  // Initial Skeleton while loading direct URL before activeVideo is populated
   if (loading && !detail) {
     return (
       <>
@@ -273,6 +361,7 @@ export const WatchPage: React.FC<WatchPageProps> = ({
 
         <CommentSection
           videoId={detail.id}
+          ytId={detail.yt_id}
           initialTotal={detail.comments_count}
           onNotify={onNotify}
         />

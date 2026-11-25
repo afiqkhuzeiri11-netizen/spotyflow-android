@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
-from sqlalchemy import event
+from dotenv import load_dotenv
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -11,6 +13,9 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+
+# Load /backend/.env safely before reading environment variables
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 # Default SQLite async URL; swap DATABASE_URL to postgresql+asyncpg://user:pass@host/db for PostgreSQL
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./veloxtube.db").strip()
@@ -55,11 +60,25 @@ class Base(DeclarativeBase):
 
 
 async def init_db() -> None:
-    """Create all SQL tables if they do not yet exist."""
+    """Create all SQL tables if they do not yet exist and apply safe column migrations."""
     import models  # noqa: F401  Ensure all ORM models are registered on Base.metadata
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        # Safe additive migration for existing SQLite databases created before Google YouTube Sync
+        if is_sqlite:
+            result = await conn.execute(text("PRAGMA table_info(users)"))
+            existing_cols = {row[1] for row in result.fetchall()}
+            additive_cols = [
+                ("google_user_id", "VARCHAR(128)"),
+                ("google_access_token", "TEXT"),
+                ("google_refresh_token", "TEXT"),
+                ("google_token_expires_at", "DATETIME"),
+            ]
+            for col_name, col_type in additive_cols:
+                if col_name not in existing_cols:
+                    await conn.execute(text(f"ALTER TABLE users ADD COLUMN {col_name} {col_type}"))
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

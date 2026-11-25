@@ -11,8 +11,23 @@ export type CategoryId =
   | 'culinary'
   | 'recent';
 
+export type SearchFilterId =
+  | 'all'
+  | 'video'
+  | 'shorts'
+  | 'channel'
+  | 'live'
+  | 'today'
+  | 'most_viewed'
+  | 'long';
+
 export interface CategoryOption {
   id: CategoryId;
+  label: string;
+}
+
+export interface SearchFilterOption {
+  id: SearchFilterId;
   label: string;
 }
 
@@ -26,6 +41,8 @@ export interface UserPublic {
   verified: boolean;
   provider: string;
   subscribers_count: number;
+  youtube_connected?: boolean;
+  google_user_id?: string | null;
   created_at: string;
 }
 
@@ -44,10 +61,16 @@ export interface ChannelPublic {
   verified: boolean;
   subscribers_count: number;
   subscribed_by_me: boolean;
+  yt_channel_id?: string | null;
 }
 
 export interface VideoCardItem {
   id: number;
+  yt_id?: string | null;
+  yt_channel_id?: string | null;
+  result_type?: 'video' | 'short' | 'channel';
+  embed_url?: string | null;
+  resume_position_sec?: number;
   title: string;
   description: string;
   category: string;
@@ -79,6 +102,58 @@ export interface VideoListResponse {
   page: number;
   limit: number;
   has_more: boolean;
+}
+
+export interface MassiveSearchResponse extends VideoListResponse {
+  next_page_token?: string | null;
+  source?: string;
+}
+
+export interface YouTubeStreamInfo {
+  yt_id: string;
+  title: string;
+  description: string;
+  thumbnail_url: string;
+  hls_url: string | null;
+  mp4_url: string;
+  embed_url: string;
+  duration_sec: number;
+  views: number;
+  likes_count: number;
+  is_live: boolean;
+  is_short: boolean;
+  tags: string[];
+  channel_name: string;
+  channel_id: string;
+  subscribers_count: number;
+  has_audio: boolean;
+}
+
+export interface WatchHistoryItem {
+  video_key: string;
+  title: string;
+  channel_name: string;
+  thumbnail_url: string;
+  duration_sec: number;
+  position_sec: number;
+  source: string;
+  watched_at: string;
+}
+
+export interface YouTubeChannelSub {
+  id: number;
+  yt_channel_id: string;
+  title: string;
+  description: string;
+  avatar_url: string | null;
+}
+
+export interface YouTubePlaylistItem {
+  id: string;
+  title: string;
+  description: string;
+  item_count: number;
+  thumbnail_url: string;
 }
 
 export interface ShortsListResponse {
@@ -173,4 +248,15 @@ export const CATEGORIES: CategoryOption[] = [
   { id: 'education', label: 'Pendidikan' },
   { id: 'culinary', label: 'Kuliner' },
   { id: 'recent', label: 'Baru diupload' },
+];
+
+export const SEARCH_FILTERS: SearchFilterOption[] = [
+  { id: 'all', label: 'Semua' },
+  { id: 'video', label: 'Video' },
+  { id: 'shorts', label: 'Shorts' },
+  { id: 'channel', label: 'Channel' },
+  { id: 'live', label: 'Live' },
+  { id: 'today', label: 'Upload Hari Ini' },
+  { id: 'most_viewed', label: 'Paling Banyak Ditonton' },
+  { id: 'long', label: 'Durasi > 20 Menit' },
 ];

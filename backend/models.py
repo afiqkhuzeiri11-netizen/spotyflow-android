@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -34,6 +35,10 @@ class User(Base):
     verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     provider: Mapped[str] = mapped_column(String(24), default="local", nullable=False)
     base_subscribers: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    google_user_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    google_access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    google_refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    google_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     videos: Mapped[list["Video"]] = relationship(
@@ -42,6 +47,10 @@ class User(Base):
     )
     comments: Mapped[list["Comment"]] = relationship(
         back_populates="author",
+        cascade="all, delete-orphan",
+    )
+    history_entries: Mapped[list["WatchHistory"]] = relationship(
+        back_populates="user",
         cascade="all, delete-orphan",
     )
 
@@ -194,3 +203,32 @@ class CommentLike(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     comment: Mapped["Comment"] = relationship(back_populates="likes")
+
+
+class WatchHistory(Base):
+    """Cross-device Watch History & Resume Playback keyed by user_id / google_user_id."""
+
+    __tablename__ = "watch_history"
+    __table_args__ = (
+        UniqueConstraint("user_id", "video_key", name="uq_watch_history_user_video"),
+        Index("ix_watch_history_user_watched", "user_id", "watched_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    google_user_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    video_key: Mapped[str] = mapped_column(String(64), nullable=False)  # numeric ID or "yt_<11char>"
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    channel_name: Mapped[str] = mapped_column(String(120), default="VeloxTube", nullable=False)
+    thumbnail_url: Mapped[str] = mapped_column(String(600), default="", nullable=False)
+    duration_sec: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    position_sec: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    source: Mapped[str] = mapped_column(String(24), default="veloxtube", nullable=False)
+    watched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="history_entries")

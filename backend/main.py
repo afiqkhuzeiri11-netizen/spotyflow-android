@@ -5,6 +5,7 @@ import mimetypes
 import re
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -24,7 +25,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import desc, func, or_, select, update
+from sqlalchemy import delete, desc, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -39,7 +40,18 @@ from auth import (
     verify_password,
 )
 from database import AsyncSessionLocal, get_db, init_db
-from models import Comment, CommentLike, Subscription, User, Video, VideoReaction
+from google_youtube import (
+    exchange_google_auth_code,
+    fetch_google_userinfo,
+    fetch_youtube_liked_videos,
+    fetch_youtube_playlists,
+    fetch_youtube_subscriptions,
+    parse_takeout_watch_history,
+    post_youtube_comment,
+    rate_youtube_video,
+    subscribe_youtube_channel,
+)
+from models import Comment, CommentLike, Subscription, User, Video, VideoReaction, WatchHistory
 from schemas import (
     AuthTokenResponse,
     ChannelPublic,
@@ -50,6 +62,7 @@ from schemas import (
     CommentReplyResponse,
     CommentResponse,
     GoogleAuthRequest,
+    GoogleOAuthSyncRequest,
     LikeRequest,
     LikeResponse,
     LoginRequest,
@@ -61,6 +74,11 @@ from schemas import (
     VideoCardResponse,
     VideoDetailResponse,
     VideoListResponse,
+    WatchHistoryItemResponse,
+    WatchHistoryProgressRequest,
+    YouTubeCommentRequest,
+    YouTubeRateRequest,
+    YouTubeSubscribeRequest,
 )
 from seed import seed_database
 from video_processor import (
@@ -71,6 +89,12 @@ from video_processor import (
     generate_fallback_svg_thumbnail,
     is_ffmpeg_available,
     transcode_video_to_hls_background,
+)
+from youtube_engine import (
+    fetch_trending_queries,
+    fetch_youtube_suggestions,
+    resolve_youtube_stream,
+    search_youtube_massive,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -243,6 +267,8 @@ async def _build_user_public(db: AsyncSession, user: User) -> UserPublic:
         verified=user.verified,
         provider=user.provider,
         subscribers_count=user.base_subscribers + int(db_subs),
+        youtube_connected=bool(user.google_access_token),
+        google_user_id=user.google_user_id,
         created_at=user.created_at,
     )
 
@@ -1029,3 +1055,443 @@ async def toggle_comment_like(
         likes_count=comment.base_likes + db_likes,
         liked_by_me=liked,
     )
+
+
+# =========================================================================
+# 5. MASSIVE YOUTUBE SEARCH, REAL-TIME SUGGESTIONS & INSTANT STREAM PREFETCH
+# =========================================================================
+
+@app.get("/api/search")
+async def massive_youtube_search(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User | None, Depends(get_optional_user)],
+    q: str = Query(default="", max_length=160),
+    filter: Literal["all", "video", "shorts", "channel", "live", "today", "most_viewed", "long"] = Query(
+        default="all"
+    ),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=50),
+    page_token: str | None = Query(default=None),
+):
+    query_str = q.strip()
+    if not query_str:
+        return {
+            "items": [],
+            "total": 0,
+            "page": page,
+            "limit": limit,
+            "has_more": False,
+            "next_page_token": None,
+            "source": "empty",
+        }
+
+    result = await search_youtube_massive(
+        query=query_str,
+        filter_type=filter,
+        page=page,
+        limit=limit,
+        page_token=page_token,
+    )
+
+    # Also merge matching local SQL videos at the top of page 1 if external search is empty
+    if page == 1 and not result["items"]:
+        pattern = f"%{query_str}%"
+        local_videos = list(
+            (
+                await db.execute(
+                    select(Video)
+                    .options(selectinload(Video.channel))
+                    .where(
+                        or_(
+                            Video.title.ilike(pattern),
+                            Video.description.ilike(pattern),
+                            Video.tags.ilike(pattern),
+                        )
+                    )
+                    .order_by(desc(Video.views))
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        serialized = [v.model_dump(mode="json") for v in await _serialize_video_cards(db, local_videos, current_user)]
+        return {
+            "items": serialized,
+            "total": len(serialized),
+            "page": 1,
+            "limit": limit,
+            "has_more": False,
+            "next_page_token": None,
+            "source": "local_db",
+        }
+
+    return result
+
+
+@app.get("/api/search/suggest")
+async def search_suggestions(q: str = Query(default="", max_length=120)):
+    suggestions = await fetch_youtube_suggestions(q)
+    return {"query": q, "suggestions": suggestions}
+
+
+@app.get("/api/search/trending")
+async def search_trending():
+    queries = await fetch_trending_queries()
+    return {"trending": queries}
+
+
+@app.get("/api/yt/stream/{yt_id}")
+async def get_youtube_stream(yt_id: str):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", yt_id):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ID video YouTube tidak valid.")
+    return await resolve_youtube_stream(yt_id)
+
+
+@app.post("/api/videos/{video_key}/prefetch")
+async def prefetch_video_stream(video_key: str, background_tasks: BackgroundTasks):
+    """Silent hover/viewport prefetch warming TTLCache for zero perceived playback delay."""
+    clean = video_key.strip()
+    yt_id = clean[3:] if clean.startswith("yt_") else (clean if not clean.isdigit() else None)
+    if yt_id and re.fullmatch(r"[A-Za-z0-9_-]{6,20}", yt_id):
+        background_tasks.add_task(resolve_youtube_stream, yt_id)
+        return {"prefetched": True, "kind": "youtube", "yt_id": yt_id}
+    return {"prefetched": True, "kind": "local", "video_key": clean}
+
+
+# =========================================================================
+# 6. GOOGLE OAUTH 2.0 FULL YOUTUBE ACCOUNT SYNC & 2-WAY ACTIONS
+# =========================================================================
+
+@app.post("/api/auth/google/oauth", response_model=AuthTokenResponse)
+async def google_oauth_youtube_sync(
+    body: GoogleOAuthSyncRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    access_token = body.access_token
+    refresh_token: str | None = None
+    expires_in = body.expires_in or 3500
+
+    if not access_token and body.code:
+        try:
+            token_data = await exchange_google_auth_code(body.code, body.redirect_uri)
+            access_token = token_data.get("access_token")
+            refresh_token = token_data.get("refresh_token")
+            expires_in = int(token_data.get("expires_in") or 3500)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Gagal menukar kode OAuth Google: {exc}",
+            ) from exc
+
+    if not access_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="access_token atau code Google OAuth wajib disertakan.",
+        )
+
+    try:
+        profile = await fetch_google_userinfo(access_token)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token Google OAuth tidak valid atau sudah kedaluwarsa.",
+        ) from exc
+
+    email = str(profile.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Akun Google tidak memiliki alamat email yang terverifikasi.",
+        )
+
+    user = await find_or_create_google_user(
+        db=db,
+        email=email,
+        name=str(profile.get("name") or email.split("@")[0]),
+        picture=profile.get("picture"),
+    )
+
+    user.google_user_id = str(profile.get("sub") or user.google_user_id or "")
+    user.google_access_token = access_token
+    if refresh_token:
+        user.google_refresh_token = refresh_token
+    user.google_token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+    await db.commit()
+    await db.refresh(user)
+
+    jwt_token = create_access_token(user.id, user.username)
+    return AuthTokenResponse(access_token=jwt_token, user=await _build_user_public(db, user))
+
+
+@app.get("/api/youtube/subscriptions")
+async def get_synced_youtube_subscriptions(
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    if not current_user.google_access_token:
+        return {"connected": False, "channels": [], "videos": []}
+    try:
+        data = await fetch_youtube_subscriptions(current_user.google_access_token)
+        return {"connected": True, **data}
+    except Exception as exc:
+        logger.warning("YouTube subscriptions sync failed: %s", exc)
+        return {"connected": False, "channels": [], "videos": [], "error": "Token YouTube perlu disegarkan."}
+
+
+@app.get("/api/youtube/liked")
+async def get_synced_youtube_liked(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    yt_videos: list[dict] = []
+    connected = bool(current_user.google_access_token)
+    if current_user.google_access_token:
+        try:
+            yt_videos = await fetch_youtube_liked_videos(current_user.google_access_token)
+        except Exception as exc:
+            logger.warning("YouTube liked sync failed: %s", exc)
+            connected = False
+
+    # Also include local VeloxTube liked videos
+    liked_ids = list(
+        (
+            await db.execute(
+                select(VideoReaction.video_id).where(
+                    VideoReaction.user_id == current_user.id,
+                    VideoReaction.is_like.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    local_serialized: list[dict] = []
+    if liked_ids:
+        local_vids = list(
+            (
+                await db.execute(
+                    select(Video).options(selectinload(Video.channel)).where(Video.id.in_(liked_ids))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        local_serialized = [
+            v.model_dump(mode="json")
+            for v in await _serialize_video_cards(db, local_vids, current_user)
+        ]
+
+    return {"connected": connected, "items": local_serialized + yt_videos}
+
+
+@app.get("/api/youtube/playlists")
+async def get_synced_youtube_playlists(
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    if not current_user.google_access_token:
+        return {"connected": False, "items": []}
+    try:
+        playlists = await fetch_youtube_playlists(current_user.google_access_token)
+        return {"connected": True, "items": playlists}
+    except Exception as exc:
+        logger.warning("YouTube playlists sync failed: %s", exc)
+        return {"connected": False, "items": []}
+
+
+@app.post("/api/youtube/rate")
+async def youtube_two_way_rate(
+    body: YouTubeRateRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    if not current_user.google_access_token:
+        return {"synced": False, "reason": "Akun Google/YouTube belum dihubungkan."}
+    ok = await rate_youtube_video(current_user.google_access_token, body.yt_id, body.rating)
+    return {"synced": ok, "yt_id": body.yt_id, "rating": body.rating}
+
+
+@app.post("/api/youtube/subscribe")
+async def youtube_two_way_subscribe(
+    body: YouTubeSubscribeRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    if not current_user.google_access_token:
+        return {"synced": False, "reason": "Akun Google/YouTube belum dihubungkan."}
+    ok = await subscribe_youtube_channel(current_user.google_access_token, body.yt_channel_id)
+    return {"synced": ok, "yt_channel_id": body.yt_channel_id}
+
+
+@app.post("/api/youtube/comment")
+async def youtube_two_way_comment(
+    body: YouTubeCommentRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    if not current_user.google_access_token:
+        return {"synced": False, "reason": "Akun Google/YouTube belum dihubungkan."}
+    ok = await post_youtube_comment(current_user.google_access_token, body.yt_id, body.content)
+    return {"synced": ok, "yt_id": body.yt_id}
+
+
+# =========================================================================
+# 7. CROSS-DEVICE WATCH HISTORY, RESUME PLAYBACK & GOOGLE TAKEOUT IMPORT
+# =========================================================================
+
+@app.get("/api/history", response_model=list[WatchHistoryItemResponse])
+async def list_watch_history(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    limit: int = Query(default=60, ge=1, le=200),
+):
+    rows = list(
+        (
+            await db.execute(
+                select(WatchHistory)
+                .where(WatchHistory.user_id == current_user.id)
+                .order_by(desc(WatchHistory.watched_at))
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        WatchHistoryItemResponse(
+            video_key=r.video_key,
+            title=r.title,
+            channel_name=r.channel_name,
+            thumbnail_url=r.thumbnail_url,
+            duration_sec=r.duration_sec,
+            position_sec=r.position_sec,
+            source=r.source,
+            watched_at=r.watched_at,
+        )
+        for r in rows
+    ]
+
+
+@app.post("/api/history/progress", response_model=WatchHistoryItemResponse)
+async def upsert_watch_history_progress(
+    body: WatchHistoryProgressRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    existing = (
+        await db.execute(
+            select(WatchHistory).where(
+                WatchHistory.user_id == current_user.id,
+                WatchHistory.video_key == body.video_key,
+            )
+        )
+    ).scalar_one_or_none()
+
+    now = datetime.now(timezone.utc)
+    if existing:
+        existing.title = body.title
+        existing.channel_name = body.channel_name
+        if body.thumbnail_url:
+            existing.thumbnail_url = body.thumbnail_url
+        if body.duration_sec > 0:
+            existing.duration_sec = body.duration_sec
+        existing.position_sec = body.position_sec
+        existing.watched_at = now
+        entry = existing
+    else:
+        entry = WatchHistory(
+            user_id=current_user.id,
+            google_user_id=current_user.google_user_id,
+            video_key=body.video_key,
+            title=body.title,
+            channel_name=body.channel_name,
+            thumbnail_url=body.thumbnail_url,
+            duration_sec=body.duration_sec,
+            position_sec=body.position_sec,
+            source=body.source,
+            watched_at=now,
+        )
+        db.add(entry)
+
+    await db.commit()
+    await db.refresh(entry)
+    return WatchHistoryItemResponse(
+        video_key=entry.video_key,
+        title=entry.title,
+        channel_name=entry.channel_name,
+        thumbnail_url=entry.thumbnail_url,
+        duration_sec=entry.duration_sec,
+        position_sec=entry.position_sec,
+        source=entry.source,
+        watched_at=entry.watched_at,
+    )
+
+
+@app.delete("/api/history/{video_key}")
+async def delete_watch_history_item(
+    video_key: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    await db.execute(
+        delete(WatchHistory).where(
+            WatchHistory.user_id == current_user.id,
+            WatchHistory.video_key == video_key,
+        )
+    )
+    await db.commit()
+    return {"deleted": True, "video_key": video_key}
+
+
+@app.delete("/api/history")
+async def clear_watch_history(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    await db.execute(delete(WatchHistory).where(WatchHistory.user_id == current_user.id))
+    await db.commit()
+    return {"cleared": True}
+
+
+@app.post("/api/history/import-takeout")
+async def import_takeout_watch_history(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    file: UploadFile = File(...),
+):
+    raw = await file.read()
+    if len(raw) > 25 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Ukuran file watch-history.json maksimal 25 MB.",
+        )
+    try:
+        entries = parse_takeout_watch_history(raw, max_items=300)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Gagal membaca file Google Takeout: {exc}",
+        ) from exc
+
+    imported = 0
+    for item in entries:
+        existing = (
+            await db.execute(
+                select(WatchHistory).where(
+                    WatchHistory.user_id == current_user.id,
+                    WatchHistory.video_key == item["video_key"],
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            db.add(
+                WatchHistory(
+                    user_id=current_user.id,
+                    google_user_id=current_user.google_user_id,
+                    **item,
+                )
+            )
+            imported += 1
+
+    await db.commit()
+    return {
+        "imported": imported,
+        "parsed_total": len(entries),
+        "message": f"Berhasil mengimpor {imported} riwayat tontonan dari Google Takeout.",
+    }

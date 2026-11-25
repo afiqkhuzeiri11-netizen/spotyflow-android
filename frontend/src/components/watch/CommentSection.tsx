@@ -11,12 +11,13 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { extractApiError, videosApi } from '../../services/api';
+import { extractApiError, videosApi, youtubeApi } from '../../services/api';
 import type { CommentItem, CommentReplyItem, CommentSort } from '../../types/api';
 import { formatCompactNumber, formatRelativeTime } from '../../utils/format';
 
 interface CommentSectionProps {
   videoId: number;
+  ytId?: string | null;
   initialTotal?: number;
   onNotify: (msg: string) => void;
   /** When true, renders ONLY as a slide-up modal drawer (reused by ShortsPage) */
@@ -56,6 +57,7 @@ const AvatarBadge: React.FC<{
 export const CommentSection: React.FC<CommentSectionProps> = React.memo(
   ({
     videoId,
+    ytId = null,
     initialTotal = 0,
     onNotify,
     drawerOnly = false,
@@ -138,6 +140,41 @@ export const CommentSection: React.FC<CommentSectionProps> = React.memo(
 
       setSubmitting(true);
       try {
+        if (ytId) {
+          const ytRes = await youtubeApi.comment(ytId, trimmed);
+          const localComment: CommentItem = {
+            id: Date.now(),
+            video_id: videoId,
+            content: trimmed,
+            likes_count: 0,
+            liked_by_me: false,
+            is_pinned: false,
+            is_channel_owner: false,
+            created_at: new Date().toISOString(),
+            author: {
+              id: user.id,
+              display_name: user.display_name,
+              handle: user.handle,
+              avatar_url: user.avatar_url,
+              verified: user.verified,
+            },
+            replies: [],
+          };
+          setComments((prev) => [localComment, ...prev]);
+          setTotalCount((c) => {
+            const next = c + 1;
+            onCountChange?.(next);
+            return next;
+          });
+          setInputText('');
+          setInputFocused(false);
+          onNotify(
+            ytRes.synced
+              ? 'Komentar berhasil dikirim ke YouTube!'
+              : 'Komentar disimpan secara lokal.'
+          );
+          return;
+        }
         const created = await videosApi.addComment(videoId, trimmed, null);
         setComments((prev) => [created, ...prev]);
         setTotalCount((c) => {

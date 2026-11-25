@@ -16,7 +16,24 @@ import {
   enterNativeFullscreenOrientation,
   exitNativeFullscreenOrientation,
 } from '../../hooks/useNativeBridge';
+import { historyApi } from '../../services/api';
 import { MiniProgressBar, PlayerControls } from './PlayerControls';
+
+const VOLUME_STORAGE_KEY = 'veloxtube_player_volume_v1';
+
+function readSavedVolume(): number {
+  try {
+    const raw = localStorage.getItem(VOLUME_STORAGE_KEY);
+    if (!raw) return 1.0;
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 1) {
+      return parsed === 0 ? 1.0 : parsed;
+    }
+  } catch {
+    // Ignore storage error
+  }
+  return 1.0;
+}
 
 const DEFAULT_QUALITIES: QualityOption[] = [
   { label: 'Auto', height: -1, levelIndex: -1 },
@@ -81,8 +98,16 @@ export const GlobalVideoPlayer: React.FC<GlobalVideoPlayerProps> = React.memo(
     const [isPlaying, setIsPlaying] = useState(true);
     const [isBuffering, setIsBuffering] = useState(true);
     const [isMuted, setIsMuted] = useState(false);
-    const [volume, setVolume] = useState(0.85);
+    const [volume, setVolume] = useState<number>(() => readSavedVolume());
     const [playbackRate, setPlaybackRate] = useState(1);
+
+    // Determine whether to use synchronized YouTube Embed (when yt_id has no direct muxed HLS/MP4 stream)
+    const hasDirectStream = Boolean(
+      (video.hls_url && video.hls_url.includes('.m3u8')) ||
+        (video.mp4_url && !video.mp4_url.includes('youtube.com/watch'))
+    );
+    const useYoutubeEmbed = Boolean(video.yt_id && !hasDirectStream);
+    const resumeAppliedRef = useRef<string | null>(null);
     const [qualities, setQualities] = useState<QualityOption[]>(DEFAULT_QUALITIES);
     const [activeQualityLabel, setActiveQualityLabel] = useState('Auto');
     const [ambientEnabled, setAmbientEnabled] = useState(true);
@@ -147,6 +172,25 @@ export const GlobalVideoPlayer: React.FC<GlobalVideoPlayerProps> = React.memo(
 
     // Attach HLS (.m3u8) with automatic MP4 Byte-Range fallback ONLY when video.id changes
     useEffect(() => {
+      if (useYoutubeEmbed) {
+        destroyMediaEngine();
+        setIsBuffering(false);
+        // Save entry immediately to cross-device watch history
+        const key = video.yt_id ? `yt_${video.yt_id}` : String(video.id);
+        historyApi
+          .saveProgress({
+            video_key: key,
+            title: video.title,
+            channel_name: video.channel.display_name,
+            thumbnail_url: video.thumbnail_url,
+            duration_sec: video.duration_sec || 0,
+            position_sec: video.resume_position_sec || 0,
+            source: 'youtube',
+          })
+          .catch(() => {});
+        return;
+      }
+
       const el = videoRef.current;
       if (!el) return;
 
@@ -155,9 +199,14 @@ export const GlobalVideoPlayer: React.FC<GlobalVideoPlayerProps> = React.memo(
       setIsBuffering(true);
       setActiveQualityLabel('Auto');
       setQualities(DEFAULT_QUALITIES);
+      resumeAppliedRef.current = null;
 
-      el.volume = volume;
-      el.muted = isMuted;
+      // Always open videos with audio ON (muted = false) and saved volume (default 100%)
+      const savedVol = readSavedVolume();
+      el.volume = savedVol;
+      el.muted = false;
+      setVolume(savedVol);
+      setIsMuted(false);
       el.playbackRate = playbackRate;
 
       const startMp4Fallback = () => {
@@ -237,7 +286,36 @@ export const GlobalVideoPlayer: React.FC<GlobalVideoPlayerProps> = React.memo(
       };
       // Strictly re-run ONLY when switching video source
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [video.id, video.hls_url, video.mp4_url]);
+    }, [video.id, video.yt_id, video.hls_url, video.mp4_url, useYoutubeEmbed]);
+
+    // Periodic Cross-Device Watch History & Resume Playback sync (every 5s)
+    useEffect(() => {
+      if (useYoutubeEmbed) return;
+      const videoKey = video.yt_id ? `yt_${video.yt_id}` : String(video.id);
+      const saveNow = () => {
+        const el = videoRef.current;
+        if (!el || el.readyState < 1) return;
+        const pos = Number.isFinite(el.currentTime) ? el.currentTime : 0;
+        const dur = Number.isFinite(el.duration) && el.duration > 0 ? Math.floor(el.duration) : video.duration_sec;
+        historyApi
+          .saveProgress({
+            video_key: videoKey,
+            title: video.title,
+            channel_name: video.channel.display_name,
+            thumbnail_url: video.thumbnail_url,
+            duration_sec: dur || 0,
+            position_sec: pos,
+            source: video.yt_id ? 'youtube' : 'veloxtube',
+          })
+          .catch(() => {});
+      };
+
+      const interval = window.setInterval(saveNow, 5000);
+      return () => {
+        window.clearInterval(interval);
+        saveNow();
+      };
+    }, [video.id, video.yt_id, video.title, video.channel.display_name, video.thumbnail_url, video.duration_sec, useYoutubeEmbed]);
 
     // Lightweight Ambient Mode: downscaled 16x9 canvas sampled every 500ms (zero per-frame blur!)
     useEffect(() => {
@@ -366,6 +444,11 @@ export const GlobalVideoPlayer: React.FC<GlobalVideoPlayerProps> = React.memo(
         }
         setVolume(clamped);
         setIsMuted(clamped === 0);
+        try {
+          if (clamped > 0) localStorage.setItem(VOLUME_STORAGE_KEY, String(clamped));
+        } catch {
+          // Ignore storage error
+        }
         scheduleAutoHide();
       },
       [scheduleAutoHide]
@@ -640,43 +723,75 @@ export const GlobalVideoPlayer: React.FC<GlobalVideoPlayerProps> = React.memo(
                 : 'relative aspect-video w-full cursor-pointer select-none overflow-hidden bg-black md:rounded-xl'
             }
           >
-            <video
-              ref={videoRef}
-              playsInline
-              crossOrigin="anonymous"
-              poster={video.thumbnail_url}
-              onPlay={() => {
-                setIsPlaying(true);
-                setIsBuffering(false);
-                if ('mediaSession' in navigator) {
-                  try {
-                    navigator.mediaSession.playbackState = 'playing';
-                  } catch {
-                    // Ignore
-                  }
+            {useYoutubeEmbed ? (
+              <iframe
+                key={video.yt_id}
+                src={
+                  video.embed_url ||
+                  `https://www.youtube.com/embed/${video.yt_id}?autoplay=1&mute=0&playsinline=1&rel=0&enablejsapi=1${
+                    video.resume_position_sec && video.resume_position_sec > 5
+                      ? `&start=${Math.floor(video.resume_position_sec)}`
+                      : ''
+                  }`
                 }
-              }}
-              onPause={() => {
-                setIsPlaying(false);
-                setControlsVisible(true);
-                if ('mediaSession' in navigator) {
-                  try {
-                    navigator.mediaSession.playbackState = 'paused';
-                  } catch {
-                    // Ignore
+                title={video.title}
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+                allowFullScreen
+                className="h-full w-full border-0"
+              />
+            ) : (
+              <video
+                ref={videoRef}
+                playsInline
+                crossOrigin="anonymous"
+                poster={video.thumbnail_url}
+                onLoadedMetadata={(e) => {
+                  const el = e.currentTarget;
+                  const resumeSec = video.resume_position_sec || 0;
+                  const key = video.yt_id ? `yt_${video.yt_id}` : String(video.id);
+                  if (
+                    resumeSec > 5 &&
+                    resumeAppliedRef.current !== key &&
+                    Number.isFinite(el.duration) &&
+                    resumeSec < el.duration - 5
+                  ) {
+                    el.currentTime = resumeSec;
+                    resumeAppliedRef.current = key;
                   }
-                }
-              }}
-              onWaiting={() => setIsBuffering(true)}
-              onPlaying={() => setIsBuffering(false)}
-              onCanPlay={() => setIsBuffering(false)}
-              onEnded={() => {
-                if (hasNextVideo) onNextVideo();
-              }}
-              className="h-full w-full object-contain"
-            />
+                }}
+                onPlay={() => {
+                  setIsPlaying(true);
+                  setIsBuffering(false);
+                  if ('mediaSession' in navigator) {
+                    try {
+                      navigator.mediaSession.playbackState = 'playing';
+                    } catch {
+                      // Ignore
+                    }
+                  }
+                }}
+                onPause={() => {
+                  setIsPlaying(false);
+                  setControlsVisible(true);
+                  if ('mediaSession' in navigator) {
+                    try {
+                      navigator.mediaSession.playbackState = 'paused';
+                    } catch {
+                      // Ignore
+                    }
+                  }
+                }}
+                onWaiting={() => setIsBuffering(true)}
+                onPlaying={() => setIsBuffering(false)}
+                onCanPlay={() => setIsBuffering(false)}
+                onEnded={() => {
+                  if (hasNextVideo) onNextVideo();
+                }}
+                className="h-full w-full object-contain"
+              />
+            )}
 
-            {isBuffering && (
+            {!useYoutubeEmbed && isBuffering && (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/25">
                 <div className="h-10 w-10 animate-spin rounded-full border-[3px] border-white/25 border-t-white" />
               </div>
@@ -785,7 +900,7 @@ export const GlobalVideoPlayer: React.FC<GlobalVideoPlayerProps> = React.memo(
             )}
 
             {/* Full Interactive Controls (Watch Mode & Fullscreen) */}
-            {!isMiniplayer && (
+            {!isMiniplayer && !useYoutubeEmbed && (
               <PlayerControls
                 videoRef={videoRef}
                 isPlaying={isPlaying}

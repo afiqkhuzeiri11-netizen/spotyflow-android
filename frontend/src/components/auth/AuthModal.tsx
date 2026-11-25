@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Loader2, Lock, Mail, User, X } from 'lucide-react';
+import { Loader2, Lock, Mail, RefreshCw, User, X } from 'lucide-react';
 import { GOOGLE_CLIENT_ID } from '../../config/api';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
@@ -29,8 +29,15 @@ interface AuthModalProps {
 
 export const AuthModal: React.FC<AuthModalProps> = ({ onSuccessToast }) => {
   const { theme } = useTheme();
-  const { authModalOpen, authModalMode, closeAuthModal, login, register, loginWithGoogle } =
-    useAuth();
+  const {
+    authModalOpen,
+    authModalMode,
+    closeAuthModal,
+    login,
+    register,
+    loginWithGoogle,
+    connectGoogleYouTube,
+  } = useAuth();
 
   const [mode, setMode] = useState<'login' | 'register'>(authModalMode);
   const [identifier, setIdentifier] = useState('');
@@ -232,9 +239,32 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccessToast }) => {
           {mode === 'login' ? 'Masuk ke VeloxTube' : 'Buat Channel VeloxTube'}
         </h2>
 
-        {/* Official Google OAuth 2.0 Sign-In (SpotyFlow Google Client ID) */}
-        <div className="mt-4 flex flex-col items-center gap-2">
+        {/* Official Google OAuth 2.0 Sign-In & Full YouTube Sync */}
+        <div className="mt-4 flex flex-col items-center gap-2.5">
           <div ref={gsiRef} className="flex min-h-[44px] w-full items-center justify-center" />
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={async () => {
+              setSubmitting(true);
+              setError(null);
+              try {
+                const u = await connectGoogleYouTube();
+                onSuccessToast(
+                  `Akun YouTube (${u.display_name}) tersinkron! Subscriptions, Liked & Playlist aktif.`
+                );
+              } catch (err) {
+                setError(err instanceof Error ? err.message : 'Sinkronisasi YouTube gagal.');
+              } finally {
+                setSubmitting(false);
+              }
+            }}
+            className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold transition-colors hover:bg-white/10 disabled:opacity-50"
+            style={{ borderColor: 'var(--vt-border)', color: 'var(--vt-text-primary)' }}
+          >
+            <RefreshCw className="h-3.5 w-3.5 text-[#FF0000]" />
+            <span>Sinkronkan Akun Google &amp; YouTube (Subscriptions, Like &amp; Playlist)</span>
+          </button>
         </div>
 
         <div className="my-4 flex items-center gap-3">

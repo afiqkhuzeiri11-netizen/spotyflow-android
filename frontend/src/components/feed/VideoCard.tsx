@@ -8,33 +8,70 @@ import {
   Share2,
   VolumeX,
 } from 'lucide-react';
+import { videosApi } from '../../services/api';
 import type { VideoCardItem } from '../../types/api';
 import { formatDuration, formatRelativeTime, formatViews } from '../../utils/format';
 
 interface VideoCardProps {
   video: VideoCardItem;
   isInWatchLater: boolean;
-  onOpenWatch: (videoId: number) => void;
+  resumeProgressPct?: number;
+  onOpenWatch: (video: VideoCardItem) => void;
   onToggleWatchLater: (videoId: number) => void;
   onShareVideo: (video: VideoCardItem) => void;
 }
 
 export const VideoCard: React.FC<VideoCardProps> = React.memo(
-  ({ video, isInWatchLater, onOpenWatch, onToggleWatchLater, onShareVideo }) => {
+  ({
+    video,
+    isInWatchLater,
+    resumeProgressPct = 0,
+    onOpenWatch,
+    onToggleWatchLater,
+    onShareVideo,
+  }) => {
     const [showPreview, setShowPreview] = useState(false);
     const [previewReady, setPreviewReady] = useState(false);
     const [menuOpen, setMenuOpen] = useState(false);
 
+    const cardRef = useRef<HTMLElement | null>(null);
+    const prefetchTimerRef = useRef<number | null>(null);
     const hoverTimerRef = useRef<number | null>(null);
     const videoElRef = useRef<HTMLVideoElement | null>(null);
     const hlsRef = useRef<Hls | null>(null);
     const menuRef = useRef<HTMLDivElement | null>(null);
+
+    const videoKey = video.yt_id ? `yt_${video.yt_id}` : String(video.id);
+
+    // Mobile Viewport Prefetch via IntersectionObserver (warms backend stream TTLCache silently)
+    useEffect(() => {
+      const node = cardRef.current;
+      if (!node || !window.matchMedia?.('(pointer: coarse)').matches) return;
+      const obs = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) {
+              videosApi.prefetch(videoKey);
+              obs.disconnect();
+              break;
+            }
+          }
+        },
+        { threshold: 0.35 }
+      );
+      obs.observe(node);
+      return () => obs.disconnect();
+    }, [videoKey]);
 
     /**
      * Mandatory Anti-Memory Leak Cleanup:
      * Immediately destroys hls.js and clears HTMLVideoElement src + buffers when leaving hover or unmounting.
      */
     const cleanupPreview = useCallback(() => {
+      if (prefetchTimerRef.current !== null) {
+        window.clearTimeout(prefetchTimerRef.current);
+        prefetchTimerRef.current = null;
+      }
       if (hoverTimerRef.current !== null) {
         window.clearTimeout(hoverTimerRef.current);
         hoverTimerRef.current = null;
@@ -74,7 +111,7 @@ export const VideoCard: React.FC<VideoCardProps> = React.memo(
       el.playsInline = true;
 
       const playMp4 = () => {
-        if (cancelled || !videoElRef.current) return;
+        if (cancelled || !videoElRef.current || !video.mp4_url) return;
         const vid = videoElRef.current;
         vid.src = video.mp4_url;
         vid.play().catch(() => {});
@@ -134,11 +171,20 @@ export const VideoCard: React.FC<VideoCardProps> = React.memo(
       if (!window.matchMedia || !window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
         return;
       }
-      if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
-      hoverTimerRef.current = window.setTimeout(() => {
-        setShowPreview(true);
-      }, 400);
-    }, []);
+      // 150ms silent prefetch for instant playback when clicked
+      if (prefetchTimerRef.current !== null) window.clearTimeout(prefetchTimerRef.current);
+      prefetchTimerRef.current = window.setTimeout(() => {
+        videosApi.prefetch(videoKey);
+      }, 150);
+
+      // 400ms muted hover preview for direct HLS/MP4 videos
+      if (!video.yt_id || video.hls_url) {
+        if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
+        hoverTimerRef.current = window.setTimeout(() => {
+          setShowPreview(true);
+        }, 400);
+      }
+    }, [videoKey, video.yt_id, video.hls_url]);
 
     const handleMouseLeave = useCallback(() => {
       setShowPreview(false);
@@ -148,12 +194,12 @@ export const VideoCard: React.FC<VideoCardProps> = React.memo(
     const handleOpen = useCallback(() => {
       setShowPreview(false);
       cleanupPreview();
-      onOpenWatch(video.id);
-    }, [cleanupPreview, onOpenWatch, video.id]);
+      onOpenWatch(video);
+    }, [cleanupPreview, onOpenWatch, video]);
 
     return (
-      <article className="group flex flex-col">
-        {/* 16:9 Thumbnail + 400ms Desktop Hover Preview */}
+      <article ref={cardRef} className="group flex flex-col">
+        {/* 16:9 Thumbnail + 150ms Prefetch + 400ms Desktop Hover Preview */}
         <div
           onClick={handleOpen}
           onMouseEnter={handleMouseEnter}
@@ -213,6 +259,15 @@ export const VideoCard: React.FC<VideoCardProps> = React.memo(
             <span className="pointer-events-none absolute bottom-2 right-2 rounded bg-black/80 px-1.5 py-0.5 text-[11px] font-medium text-white">
               {video.processing_status === 'processing' ? 'Memproses HLS' : 'HD'}
             </span>
+          )}
+
+          {resumeProgressPct > 0 && (
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-1 bg-white/25">
+              <div
+                className="h-full bg-[#FF0000]"
+                style={{ width: `${Math.min(100, Math.max(2, resumeProgressPct))}%` }}
+              />
+            </div>
           )}
         </div>
 

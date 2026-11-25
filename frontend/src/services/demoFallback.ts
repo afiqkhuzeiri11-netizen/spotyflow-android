@@ -7,6 +7,8 @@ import type {
   CommentListResponse,
   CommentSort,
   LikeResponse,
+  MassiveSearchResponse,
+  SearchFilterId,
   ShortsListResponse,
   SubscribeResponse,
   UploadVideoResponse,
@@ -14,10 +16,26 @@ import type {
   VideoCardItem,
   VideoDetailItem,
   VideoListResponse,
+  WatchHistoryItem,
+  YouTubeStreamInfo,
 } from '../types/api';
 import type { FetchVideosQuery } from './api';
 
 const DEMO_STATE_KEY = 'veloxtube_demo_state_v1';
+const LOCAL_HISTORY_KEY = 'veloxtube_watch_history_v1';
+
+const DEMO_TRENDING_QUERIES = [
+  'review laptop oled 2026',
+  'musik akustik santai indonesia',
+  'live turnamen valorant asia',
+  'tutorial react fastapi 60fps',
+  'resep ramen jepang rumahan',
+  'podcast teknologi ai lokal',
+  'lofi synthwave deep work',
+  'setup meja kerja minimalis',
+  'kopi susu gula aren barista',
+  'gameplay cyberpunk 4k 60fps',
+];
 
 // Valid public CORS-enabled HLS (.m3u8) adaptive streams & MP4 fallbacks
 const HLS_MUX = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8';
@@ -1025,5 +1043,203 @@ export const demoFallback = {
       ffmpeg_enabled: false,
       video,
     };
+  },
+
+  suggest(q: string): string[] {
+    const clean = q.trim().toLowerCase();
+    if (!clean) return DEMO_TRENDING_QUERIES;
+    const state = loadState();
+    const pool = new Set<string>(DEMO_TRENDING_QUERIES);
+    state.videos.forEach((v) => {
+      pool.add(v.title);
+      v.tags.forEach((t) => pool.add(t));
+    });
+    return Array.from(pool)
+      .filter((s) => s.toLowerCase().includes(clean))
+      .slice(0, 10);
+  },
+
+  trending(): string[] {
+    return DEMO_TRENDING_QUERIES;
+  },
+
+  massiveSearch(
+    query: string,
+    filter: SearchFilterId = 'all',
+    page = 1,
+    limit = 20
+  ): MassiveSearchResponse {
+    const state = loadState();
+    const q = query.trim().toLowerCase();
+    let items = state.videos.map((v) => hydrateVideo(state, v));
+
+    if (q) {
+      const matched = items.filter(
+        (v) =>
+          v.title.toLowerCase().includes(q) ||
+          v.description.toLowerCase().includes(q) ||
+          v.channel.display_name.toLowerCase().includes(q) ||
+          v.tags.some((t) => t.toLowerCase().includes(q))
+      );
+      items = matched.length > 0 ? matched : items;
+    }
+
+    if (filter === 'video') items = items.filter((v) => !v.is_short);
+    else if (filter === 'shorts') items = items.filter((v) => v.is_short);
+    else if (filter === 'live') items = items.filter((v) => v.is_live);
+    else if (filter === 'most_viewed') items = [...items].sort((a, b) => b.views - a.views);
+    else if (filter === 'long') items = items.filter((v) => v.duration_sec >= 1200);
+    else if (filter === 'channel') {
+      const seen = new Set<number>();
+      items = items
+        .filter((v) => {
+          if (seen.has(v.channel.id)) return false;
+          seen.add(v.channel.id);
+          return true;
+        })
+        .map((v) => ({ ...v, result_type: 'channel' as const, title: v.channel.display_name }));
+    }
+
+    const start = Math.max(0, (page - 1) * limit);
+    const sliced = items.slice(start, start + limit);
+    return {
+      items: sliced,
+      total: items.length,
+      page,
+      limit,
+      has_more: start + sliced.length < items.length,
+      next_page_token: null,
+      source: 'demo_local',
+    };
+  },
+
+  youtubeStream(ytId: string): YouTubeStreamInfo {
+    return {
+      yt_id: ytId,
+      title: `YouTube Video (${ytId})`,
+      description: 'Diputar melalui YouTube Player terintegrasi dengan audio aktif.',
+      thumbnail_url: `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`,
+      hls_url: null,
+      mp4_url: '',
+      embed_url: `https://www.youtube.com/embed/${ytId}?autoplay=1&mute=0&playsinline=1&rel=0&enablejsapi=1`,
+      duration_sec: 0,
+      views: 0,
+      likes_count: 0,
+      is_live: false,
+      is_short: false,
+      tags: ['youtube'],
+      channel_name: 'YouTube',
+      channel_id: ytId,
+      subscribers_count: 0,
+      has_audio: true,
+    };
+  },
+
+  listHistory(): WatchHistoryItem[] {
+    try {
+      const raw = localStorage.getItem(LOCAL_HISTORY_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  },
+
+  saveHistoryProgress(item: Omit<WatchHistoryItem, 'watched_at'>): WatchHistoryItem {
+    const entry: WatchHistoryItem = {
+      ...item,
+      watched_at: new Date().toISOString(),
+    };
+    const existing = demoFallback.listHistory().filter((h) => h.video_key !== item.video_key);
+    const next = [entry, ...existing].slice(0, 200);
+    try {
+      localStorage.setItem(LOCAL_HISTORY_KEY, JSON.stringify(next));
+    } catch {
+      // Ignore storage error
+    }
+    return entry;
+  },
+
+  removeHistory(videoKey: string): void {
+    const next = demoFallback.listHistory().filter((h) => h.video_key !== videoKey);
+    try {
+      localStorage.setItem(LOCAL_HISTORY_KEY, JSON.stringify(next));
+    } catch {
+      // Ignore
+    }
+  },
+
+  clearHistory(): void {
+    try {
+      localStorage.removeItem(LOCAL_HISTORY_KEY);
+    } catch {
+      // Ignore
+    }
+  },
+
+  async importTakeout(file: File): Promise<{ imported: number; parsed_total: number; message: string }> {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) {
+      throw new Error('Format watch-history.json tidak valid.');
+    }
+    const ytRe = /(?:v=|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})/;
+    const existing = demoFallback.listHistory();
+    const seen = new Set(existing.map((e) => e.video_key));
+    let imported = 0;
+    let parsedTotal = 0;
+    const added: WatchHistoryItem[] = [];
+
+    for (const row of parsed) {
+      if (!row || typeof row !== 'object') continue;
+      const url = String((row as Record<string, unknown>).titleUrl || '');
+      const m = url.match(ytRe);
+      if (!m) continue;
+      parsedTotal += 1;
+      const ytId = m[1];
+      const key = `yt_${ytId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      let title = String((row as Record<string, unknown>).title || `YouTube Video (${ytId})`).trim();
+      title = title.replace(/^(Watched |Menonton )/i, '');
+      const subs = (row as Record<string, unknown>).subtitles;
+      const channelName =
+        Array.isArray(subs) && subs[0] && typeof subs[0] === 'object'
+          ? String((subs[0] as Record<string, unknown>).name || 'YouTube')
+          : 'YouTube';
+      const watchedAt = String((row as Record<string, unknown>).time || new Date().toISOString());
+
+      added.push({
+        video_key: key,
+        title,
+        channel_name: channelName,
+        thumbnail_url: `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`,
+        duration_sec: 0,
+        position_sec: 0,
+        source: 'takeout',
+        watched_at: watchedAt,
+      });
+      imported += 1;
+      if (added.length >= 200) break;
+    }
+
+    try {
+      localStorage.setItem(LOCAL_HISTORY_KEY, JSON.stringify([...added, ...existing].slice(0, 250)));
+    } catch {
+      // Ignore
+    }
+    return {
+      imported,
+      parsed_total: parsedTotal,
+      message: `Berhasil mengimpor ${imported} riwayat tontonan dari Google Takeout.`,
+    };
+  },
+
+  listLikedLocal(): VideoCardItem[] {
+    const state = loadState();
+    const likedSet = new Set(state.likedVideoIds);
+    return state.videos.filter((v) => likedSet.has(v.id)).map((v) => hydrateVideo(state, v));
   },
 };
